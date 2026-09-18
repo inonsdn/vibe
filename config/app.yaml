@@ -1,0 +1,114 @@
+# Default application configuration.
+#
+# Layering order (later wins): built-in defaults -> this file ->
+# config/local.yaml (gitignored) -> APP_SECTION__FIELD env vars -> CLI flags.
+#
+# This whole file is hashed into every render manifest, so any drift is visible
+# after the fact. Keep comments here; they do not affect the hash (only the
+# resolved values do).
+
+paths:
+  data_root: data
+  config_dir: config
+  workflows_dir: workflows/comfyui
+  db_filename: app.db
+
+video:
+  # Final delivery contract: vertical 1080x1920, H.264, yuv420p.
+  width: 1080
+  height: 1920
+  fps: 30.0
+  pixel_format: yuv420p
+  video_codec: libx264
+  crf: 17
+  preset: slow
+  audio_codec: aac
+  audio_bitrate: 192k
+  faststart: true
+  frame_format: png          # lossless intermediates only
+  frame_filename_template: "frame_{index:06d}.png"
+  preview_scale: 0.5
+  preview_crf: 28
+
+mask:
+  # Grayscale conventions -- see docs/mask-semantics.md
+  #   0   = immutable source region
+  #   255 = editable region
+  #   1..254 = feather / blend boundary
+  immutable_value: 0
+  editable_value: 255
+  feather_radius_px: 9
+  feather_sigma: 0.0          # 0 => derived from radius
+  expansion_dilate_px: 0
+  protected_dilate_px: 2      # safety margin around face/hair/hands/skin
+  immutable_threshold: 2
+  editable_threshold: 253
+  max_editable_area_fraction: 0.60
+  min_editable_area_fraction: 0.0005
+  protected_wins: true        # protected masks beat editable masks
+
+transition:
+  flash_frames: 0             # 0 = off, otherwise 2-4
+  flash_color: [255, 255, 255]
+  flash_opacity: 0.85
+
+backend:
+  default: mock
+  frame_window: 8             # frames per render window (VRAM bound)
+  max_retries: 2
+  checkpoint_every_frames: 8
+
+comfyui:
+  base_url: "http://127.0.0.1:8188"
+  allowed_hosts: ["127.0.0.1", "localhost", "::1"]
+  allow_remote: false         # remote ComfyUI endpoints are refused by default
+  request_timeout_s: 30.0
+  poll_interval_s: 1.0
+  job_timeout_s: 900.0
+  workflow_id: garment_replace_placeholder
+  client_id: garment-replacer
+  upload_inputs: true
+
+qc:
+  # Strict for lossless intermediates, tolerant for the compressed final file.
+  lossless_protected_max_diff: 0
+  lossless_background_max_diff: 0
+  compressed_protected_mean_abs_diff: 2.0
+  compressed_protected_max_diff: 24
+  compressed_background_mean_abs_diff: 2.0
+  face_region_mean_abs_diff: 2.0
+  mask_boundary_leak_max_fraction: 0.002
+  black_frame_luma_threshold: 12
+  black_frame_max_fraction: 0.995
+  frozen_frame_max_run: 6
+  frozen_frame_mean_abs_diff: 0.25
+  garment_flicker_max_mean_delta: 28.0
+  duration_tolerance_s: 0.08
+  fps_tolerance: 0.01
+  contact_sheet_columns: 6
+  contact_sheet_tile_width: 240
+  contact_sheet_period_frames: 24
+  contact_sheet_transition_span: 6
+
+compatibility:
+  rules_file: compatibility_rules.v1.yaml
+  block_on_needs_input: true
+  allow_override: true
+
+api:
+  host: "127.0.0.1"
+  port: 8077
+  allow_remote_bind: false
+  cors_origins: []
+  enable_web_ui: true
+
+runtime:
+  log_level: INFO
+  log_to_file: true
+  offline_enforced: true
+  default_seed: 20240501
+  vram_budget_mb: 8192        # RTX 5060 8GB
+  ram_budget_mb: 32768
+  ffmpeg_binary: ffmpeg
+  ffprobe_binary: ffprobe
+  max_concurrent_jobs: 1

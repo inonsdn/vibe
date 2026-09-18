@@ -1,0 +1,195 @@
+# Compatibility rules, version 1.
+#
+# These rules run BEFORE any AI backend touches a frame. They are deterministic
+# and cheap: an impossible outfit is rejected in milliseconds instead of after
+# twenty minutes of GPU time.
+#
+# Each entry maps a rule id (implemented in app/pipeline/compatibility.py) to:
+#   enabled:   turn the rule off entirely
+#   severity:  what a triggered rule produces -- one of
+#                warning     -> recorded, does not block
+#                needs_input -> blocks; operator must supply something
+#                blocking    -> blocks; INCOMPATIBLE
+#   weight:    contribution to the aggregate confidence score
+#   params:    rule-specific thresholds
+#
+# Changing a threshold here changes behaviour with no code change. Bump
+# `rules_version` and copy this file to compatibility_rules.v2.yaml rather than
+# editing a version that existing reports already reference -- reports record
+# the rules_version and the file hash they were produced with.
+
+rules_version: "1"
+description: >-
+  Baseline garment/template compatibility rules for identity-preserving
+  garment replacement on a fixed master performance.
+
+# Which garment categories may be placed over which template clothing class.
+# A template whose base outfit exposes more skin than the replacement can cover
+# will leak the original garment or bare skin at the edges.
+category_matrix:
+  sleeveless_minimal: [top, dress, full_outfit, costume, outerwear]
+  fitted_short:       [top, bottom, dress, full_outfit, costume, outerwear]
+  fitted_full:        [top, bottom, dress, full_outfit, costume, outerwear]
+  loose_short:        [top, dress, full_outfit, costume, outerwear]
+  loose_full:         [dress, full_outfit, costume, outerwear]
+  two_piece:          [top, bottom, dress, full_outfit, costume, outerwear]
+  full_coverage:      [outerwear, full_outfit, costume]
+  neutral_bodysuit:   [top, bottom, dress, outerwear, full_outfit, costume]
+
+rules:
+  category_vs_template_class:
+    enabled: true
+    severity: blocking
+    weight: 3.0
+    params:
+      # When a category is not in the matrix above, is that fatal or just a
+      # warning? Fatal by default: it is the cheapest place to stop.
+      unlisted_is_blocking: true
+
+  required_body_coverage:
+    enabled: true
+    severity: blocking
+    weight: 3.0
+    params:
+      # A garment must cover at least as much as its category implies, and at
+      # least as much as the template's base outfit already covers -- otherwise
+      # the base garment shows through at the boundary.
+      enforce_category_minimum: true
+      enforce_template_minimum: true
+
+  sleeve_mismatch:
+    enabled: true
+    severity: needs_input
+    weight: 2.0
+    params:
+      # Steps on the sleeve scale (none < strap < cap < short < elbow <
+      # three_quarter < long) the garment may exceed the base before the arm
+      # region needs an expansion mask.
+      max_steps_longer_without_expansion: 1
+      # Going shorter than the base always exposes the original garment.
+      shorter_than_base_is_blocking: true
+
+  hem_length_mismatch:
+    enabled: true
+    severity: needs_input
+    weight: 2.0
+    params:
+      # Steps on the hem scale (crop < waist < hip < mid_thigh < knee < midi <
+      # ankle < floor) the garment may exceed the base before expansion.
+      max_steps_longer_without_expansion: 1
+      shorter_than_base_is_blocking: true
+
+  silhouette_expansion:
+    enabled: true
+    severity: needs_input
+    weight: 1.5
+    params:
+      # Steps on the silhouette scale (bodycon < fitted < straight < a_line <
+      # flared < oversized < voluminous) allowed without an expansion mask.
+      max_steps_without_expansion: 1
+      # Beyond this many steps the replacement cannot be contained by any
+      # plausible mask expansion on a fixed performance.
+      blocking_steps: 4
+
+  transparent_garment_requirements:
+    enabled: true
+    severity: needs_input
+    weight: 2.0
+    params:
+      # Above this transparency the base garment underneath becomes visible, so
+      # the template must provide a neutral base (bodysuit / minimal) or the
+      # garment must declare an underlayer.
+      transparency_threshold: 0.15
+      acceptable_template_classes: [neutral_bodysuit, sleeveless_minimal]
+      require_underlayer_declaration: true
+
+  reflective_material_warning:
+    enabled: true
+    severity: warning
+    weight: 1.0
+    params:
+      reflectivity_threshold: 0.5
+      # Materials always treated as reflective regardless of the numeric field.
+      always_flag_materials: [latex, sequin, metallic]
+
+  high_flow_fabric_warning:
+    enabled: true
+    severity: warning
+    weight: 1.0
+    params:
+      # Fabric that swings independently of the body cannot be derived from a
+      # fixed performance's motion; it will look pinned.
+      fabric_flow_threshold: 0.6
+      flow_blocking_threshold: 0.95
+
+  missing_views_for_motion:
+    enabled: true
+    severity: needs_input
+    weight: 2.5
+    params:
+      # Views required when the performance exposes them. The template's
+      # exposed_views metadata (or its absence) decides which apply.
+      always_required: [front]
+      # If the template does not declare which views the motion exposes, assume
+      # a dance turns: require back and side.
+      assume_when_unknown: [back, side]
+
+  hair_hand_occlusion_risk:
+    enabled: true
+    severity: warning
+    weight: 1.0
+    params:
+      # Long hair or hands crossing the garment region need an occlusion mask,
+      # otherwise the render paints over them.
+      require_occlusion_mask: true
+      escalate_to_needs_input_without_occlusion_mask: true
+
+  base_garment_leakage_risk:
+    enabled: true
+    severity: needs_input
+    weight: 2.5
+    params:
+      # Coverage the replacement must have, relative to the base, before the
+      # original garment is guaranteed hidden.
+      require_coverage_at_least_base: true
+      # A light garment over a dark base bleeds through more visibly.
+      dark_base_light_garment_warning: true
+
+  source_image_quality:
+    enabled: true
+    severity: needs_input
+    weight: 2.0
+    params:
+      min_image_min_side_px: 768
+      min_megapixels: 0.5
+      min_sharpness_score: 0.15
+      max_aspect_ratio: 3.0
+
+  proportion_mismatch:
+    enabled: true
+    severity: warning
+    weight: 1.0
+    params:
+      # Garment reference aspect ratio versus the body region's aspect ratio.
+      # A flat-lay shot much wider than the body region usually means the
+      # product photo is not usable for a vertical performance.
+      max_aspect_ratio_delta: 1.8
+      blocking_aspect_ratio_delta: 3.5
+
+  incomplete_product_information:
+    enabled: true
+    severity: needs_input
+    weight: 1.5
+    params:
+      min_metadata_completeness: 0.6
+      require_usage_rights: true
+      require_pattern_description: false
+
+confidence:
+  # Confidence starts at 1.0 and loses `penalty * weight / total_weight` for
+  # each non-passing rule.
+  penalties:
+    warn: 0.35
+    needs_input: 0.7
+    fail: 1.0
+  floor: 0.0

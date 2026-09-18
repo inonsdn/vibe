@@ -1,0 +1,111 @@
+# Placeholder workflow contract.
+#
+# PURPOSE
+# -------
+# This contract proves out the *plumbing* between the application and ComfyUI
+# without requiring a single model weight. The workflow it binds
+# (garment_replace_placeholder.json) uses only core ComfyUI nodes:
+#
+#   LoadImage, LoadImageMask, ImageScale, ImageCompositeMasked, SaveImage
+#
+# It flat-composites the garment reference into the editable mask region. The
+# result looks nothing like clothing on a body -- that is the point. It is a
+# wiring test, not a renderer.
+#
+# HOW BINDING WORKS
+# -----------------
+# Application code never mentions a node id. Each logical input below names a
+# node by its *title* (the name you type into the node header in the ComfyUI
+# UI, stored as `_meta.title` in the API export) plus the input field on that
+# node. Re-arranging or re-numbering the graph therefore does not break the
+# integration; renaming a node does, and does so loudly at prepare() time.
+#
+# CONNECTING A REAL GARMENT WORKFLOW LATER
+# ----------------------------------------
+# 1. Build the workflow in ComfyUI and export it via Workflow -> Export (API).
+# 2. Title the nodes that need application-supplied values.
+# 3. Copy this file to <your_workflow_id>.contract.yaml and update
+#    workflow_file, the node titles and any extra inputs you need
+#    (pose, depth, expansion_mask, garment_reference_back, ...).
+# 4. Point config at it:  comfyui.workflow_id: <your_workflow_id>
+# 5. Run `app job render --backend comfyui`. prepare() validates that every
+#    binding resolves and that every node class is installed locally, and
+#    fails with the exact list of problems if not.
+#
+# See docs/comfyui-integration.md for the full walkthrough.
+
+workflow_id: garment_replace_placeholder
+workflow_file: garment_replace_placeholder.json
+description: >-
+  Wiring-test workflow using core ComfyUI nodes only. Flat-composites a garment
+  reference image into the editable mask region. No checkpoints, no custom
+  nodes, no model weights.
+
+# When false, `app doctor` and the ComfyUI backend report that this workflow
+# needs no model nodes, so it can be validated on a bare ComfyUI install.
+requires_model_nodes: false
+
+inputs:
+  - logical_name: source_frame
+    node_title: SOURCE_FRAME
+    input_name: image
+    kind: image_upload
+    required: true
+    description: >-
+      The immutable source frame for this reveal frame index. Uploaded to
+      ComfyUI's input folder; the value written here is the returned filename.
+
+  - logical_name: garment_reference
+    node_title: GARMENT_REFERENCE_FRONT
+    input_name: image
+    kind: image_upload
+    required: true
+    description: Front-view garment reference image (uploaded).
+
+  - logical_name: mask
+    node_title: EDITABLE_MASK
+    input_name: image
+    kind: image_upload
+    required: true
+    description: >-
+      The effective editable mask (0 immutable / 255 editable, feathered).
+      Read as the red channel by LoadImageMask.
+
+  - logical_name: width
+    node_title: GARMENT_SCALE_TO_FRAME
+    input_name: width
+    kind: value
+    required: true
+    description: Frame width, so the garment reference is scaled to the frame.
+
+  - logical_name: height
+    node_title: GARMENT_SCALE_TO_FRAME
+    input_name: height
+    kind: value
+    required: true
+    description: Frame height.
+
+  - logical_name: output_prefix
+    node_title: RENDERED_FRAME_OUT
+    input_name: filename_prefix
+    kind: value
+    required: false
+    description: >-
+      Per-frame output prefix (job id + frame index) so concurrent jobs cannot
+      collide in ComfyUI's output folder.
+
+output_node_titles:
+  - RENDERED_FRAME_OUT
+
+notes:
+  seeds: >-
+    This placeholder is fully deterministic because it contains no sampler. A
+    real workflow must expose a seed input and be verified to reproduce
+    identical pixels for a fixed seed before it is trusted.
+  vram: >-
+    Core image nodes only; peak VRAM is negligible. A real garment workflow on
+    an 8GB card should use tiled VAE decode, low-VRAM mode and a frame window
+    of 4-8. See docs/troubleshooting-8gb-vram.md.
+  not_a_renderer: >-
+    Do not evaluate garment quality with this workflow. It exists to prove that
+    inputs arrive, outputs come back, resume works and manifests are complete.

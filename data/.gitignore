@@ -1,0 +1,4 @@
+# Everything under data/ is runtime state and must stay out of Git.
+*
+!.gitignore
+!README.md

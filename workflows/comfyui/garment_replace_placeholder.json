@@ -1,0 +1,58 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "SOURCE_FRAME" },
+    "inputs": {
+      "image": "placeholder_source.png",
+      "upload": "image"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "GARMENT_REFERENCE_FRONT" },
+    "inputs": {
+      "image": "placeholder_garment_front.png",
+      "upload": "image"
+    }
+  },
+  "3": {
+    "class_type": "LoadImageMask",
+    "_meta": { "title": "EDITABLE_MASK" },
+    "inputs": {
+      "image": "placeholder_mask.png",
+      "channel": "red",
+      "upload": "image"
+    }
+  },
+  "4": {
+    "class_type": "ImageScale",
+    "_meta": { "title": "GARMENT_SCALE_TO_FRAME" },
+    "inputs": {
+      "image": ["2", 0],
+      "upscale_method": "lanczos",
+      "width": 1080,
+      "height": 1920,
+      "crop": "center"
+    }
+  },
+  "5": {
+    "class_type": "ImageCompositeMasked",
+    "_meta": { "title": "GARMENT_COMPOSITE" },
+    "inputs": {
+      "destination": ["1", 0],
+      "source": ["4", 0],
+      "mask": ["3", 0],
+      "x": 0,
+      "y": 0,
+      "resize_source": false
+    }
+  },
+  "6": {
+    "class_type": "SaveImage",
+    "_meta": { "title": "RENDERED_FRAME_OUT" },
+    "inputs": {
+      "images": ["5", 0],
+      "filename_prefix": "garment_replacer/placeholder"
+    }
+  }
+}

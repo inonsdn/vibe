@@ -1,0 +1,148 @@
+# Offline and security model
+
+## The claim
+
+This system performs no outbound network access. That is a statement about the
+code, so it is stated positively and tested:
+
+```python
+# src/app/offline/verify.py
+CLOUD_INTEGRATIONS: tuple[str, ...] = ()
+NETWORK_FEATURES: tuple[str, ...] = ()
+```
+
+`tests/unit/test_offline_and_env.py::test_no_cloud_integrations_are_declared`
+asserts both remain empty, so the list cannot quietly grow.
+
+Verify on your own machine:
+
+```bash
+app offline verify
+```
+
+It reports every configured endpoint and whether the policy allows it, which
+local executables exist, whether every data path is writable, GPU/CUDA info when
+available, and each adapter's status.
+
+## What is absent, on purpose
+
+No analytics. No telemetry. No crash reporting. No cloud storage. No model
+hubs. No auto-updaters. No automatic weight downloads. No license checks. No
+package installation at runtime.
+
+The only network code in the repository is an `httpx` client pointed at
+**localhost ComfyUI**, and it refuses to point anywhere else.
+
+## Endpoint policy
+
+| Endpoint | Default | Non-local? |
+| --- | --- | --- |
+| ComfyUI | `http://127.0.0.1:8188` | Refused unless `comfyui.allow_remote: true` **and** the host is in `comfyui.allowed_hosts`. |
+| API bind | `127.0.0.1:8077` | Refused unless `api.allow_remote_bind: true`. |
+
+`assert_local_endpoint()` runs in the ComfyUI client's **constructor**, so a
+misconfigured backend fails before any request can be made — not mid-render. It
+recognises loopback by IP semantics (`ipaddress.is_loopback`), not by string
+matching, so `127.0.0.2` is correctly local and `10.0.0.5` is correctly not.
+`tests/unit/test_comfyui.py` covers eight non-local URL shapes including
+private ranges, a hostname, and an IPv6 literal.
+
+FFmpeg I/O is checked too: `assert_local_path()` rejects `http://`, `https://`,
+`rtmp://`, `rtsp://`, `udp://`, `tcp://`, `ftp://`, `srt://`, `sftp://`,
+`pipe:`, `concat:` and `data:`. A crafted "video path" cannot turn ffmpeg into
+a network client.
+
+## Tests cannot reach the network
+
+`tests/conftest.py` installs an autouse fixture that patches
+`socket.socket.connect`, `connect_ex` and `socket.create_connection`. Any
+attempt to reach a non-loopback address raises `NetworkAccessAttempted` and
+fails the test that made it. Loopback stays permitted because FastAPI's
+`TestClient` and the ComfyUI transport tests run in-process; blocking it would
+break the harness rather than catch a real call.
+
+ComfyUI tests use `httpx.MockTransport` — no socket is opened at all.
+
+## Path safety
+
+Every path an operator supplies — CLI flag, API payload, YAML value — resolves
+through `DataRoot.resolve()`:
+
+* symlinks are resolved **before** the containment check
+* `..` is allowed only if the resolved result stays inside the root
+* absolute paths are allowed only if they are already inside the root
+* UNC and `//server/share` paths are rejected outright
+* Windows drive hops (`C:\…` when the root is on `D:`) are rejected
+* NUL bytes are rejected
+* directory-name identifiers must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
+  and must not be a Windows reserved name (`CON`, `NUL`, `COM1`, …)
+
+Twelve escape vectors are covered in `tests/unit/test_paths.py`, including a
+symlink pointing outside the root and traversal attempted through the HTTP API.
+
+## Destructive operations
+
+The only deletion command is `app job delete`, and it:
+
+1. resolves exactly **one** existing job's directory,
+2. confirms that path equals the canonical `<data_root>/jobs/<job_id>`,
+3. refuses without `--yes` (printing what it *would* delete),
+4. records the deletion in the audit log.
+
+There is no recursive delete of a broad or unresolved path anywhere in the
+codebase. Template ingestion refuses to write into a non-empty template
+directory rather than clearing it. Compose refuses to overwrite an existing
+output without `--overwrite`.
+
+## Immutability
+
+`source_frames/` is hashed at ingestion and re-verified before every render and
+compose. A single changed byte raises `ImmutabilityError` and the render stops —
+the system will not produce output from a source it cannot vouch for.
+
+Applied migrations are hashed too: editing a migration file that has already run
+aborts startup rather than leaving the schema in an unverifiable state.
+
+## Secrets
+
+There are none to manage — no API keys, tokens or credentials, because there is
+nothing to authenticate to. `.gitignore` excludes `.env*`, `config/local.*` and
+`*.local.yaml` so machine-specific overrides stay out of Git regardless.
+
+## Consent and provenance
+
+Every template carries a `ConsentRecord`, validated at the schema level:
+
+* `subject_kind` is exactly `synthetic` or `consented_human`
+* `adult_confirmed` must be `true` — a template cannot be persisted otherwise
+* `consented_human` requires a `consent_document_ref`
+* optional: rights holder, license, grant/expiry dates, usage restrictions,
+  provenance notes
+
+`ConsentRecord.is_expired()` supports time-limited consent. Garment usage
+rights are recorded and are part of the compatibility rules — undocumented
+rights produce `NEEDS_INPUT`.
+
+## Logging and data handling
+
+Structured JSON logs go to stderr and optionally to
+`data/logs/app.jsonl` (rotating, 16 MB × 5). They contain identifiers, frame
+indices, hashes and metrics — no pixel data, no image content, no credentials.
+There are no network log handlers.
+
+All media stays in the configured data root. Nothing is uploaded anywhere. The
+`source_url` recorded for a garment is metadata for attribution and is
+deliberately never dereferenced.
+
+## Threat model
+
+**Defended against.** An operator mistake that would corrupt an immutable
+source; a path that would escape the data root; a misconfiguration that would
+send frames to a remote host; a backend that returns pixels outside its mask; a
+crashed render silently shipping a missing frame; an unreviewed render of a
+blocked garment.
+
+**Not defended against.** A malicious local operator with filesystem access; a
+compromised ComfyUI install on the same machine; malicious content in a
+hand-authored workflow JSON. This is a single-operator local tool, and adding
+authentication theatre to a localhost service would be worse, not safer.
