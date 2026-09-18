@@ -50,8 +50,37 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+
+# Install against the TESTED pins. The -c flag is not optional polish:
+# unconstrained resolution has installed NumPy 2.5 with OpenCV 5.0, and
+# `import cv2` then aborts the interpreter (exit code 135) before a single
+# test can run -- a failure that looks like a broken repository.
+python -m pip install -e ".[dev]" -c constraints\tested-py311.txt
 ```
+
+### Dependency versions
+
+`pyproject.toml` carries deliberately conservative ranges:
+
+```
+numpy>=1.26,<2.3
+opencv-python-headless>=4.9,<5
+```
+
+`constraints/tested-py311.txt` pins the exact versions the suite was last run
+against on Python 3.11. Compatibility with NumPy 2.3+ or OpenCV 5.x is
+**untested and not claimed**. To move the ceiling: raise the bound in
+`pyproject.toml`, update the pins, and re-run the full suite on Windows 11
+before relying on it.
+
+Verify what you actually got:
+
+```powershell
+python -c "import numpy, cv2; print(numpy.__version__, cv2.__version__)"
+```
+
+A crash on that line rather than a version print is the symptom the pins exist
+to prevent.
 
 If PowerShell refuses to run the activation script:
 
@@ -74,6 +103,16 @@ python -m pytest
 ```
 
 All tests must pass with no GPU, no weights, no ComfyUI and no network.
+
+If your machine has corporate proxy variables set, the suite must still pass
+unchanged — localhost traffic deliberately ignores them. Verify both ways:
+
+```powershell
+python -m pytest                                   # as configured
+$env:ALL_PROXY = "socks5://proxy.invalid:1080"     # deliberately broken
+python -m pytest
+Remove-Item Env:\ALL_PROXY
+```
 
 ## 6. ComfyUI (optional)
 
@@ -151,6 +190,10 @@ correctly; `cmd.exe` is functional but plainer.
 | `data\templates\<id>\` | Immutable source frames, masks, analysis data |
 | `data\garments\<id>\` | Garment reference images |
 | `data\jobs\<id>\` | Rendered frames, manifest, QC reports, contact sheets |
+| `data\motion_sources\<id>\pose\` | Pose JSON for a motion reference (no imagery) |
+| `data\compositions\<id>\` | Normalized/bridge/composed poses, preview, manifest |
+| `data\heroes\<id>\images\` | Hero Character reference images |
+| `data\masters\<id>\frames\` | Candidate master frames |
 | `data\exports\` | Final `.mp4` files |
 | `data\logs\app.jsonl` | Structured JSON logs (rotating, 16 MB × 5) |
 | `data\db\app.db` | SQLite catalogue (WAL mode) |

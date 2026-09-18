@@ -9,13 +9,18 @@ The whole suite must pass with:
 
 The last one is enforced, not assumed: :func:`_block_network` patches the socket
 layer so any attempt to reach a non-loopback address fails the test that made
-it. Loopback is allowed because FastAPI's ``TestClient`` and the ComfyUI
-transport tests operate in-process, and blocking it would break the test
-harness rather than catch a real network call.
+it — both the connection call *and* the DNS lookup that would precede it.
+Loopback is allowed because FastAPI's ``TestClient`` and the ComfyUI transport
+tests operate in-process, and blocking it would break the test harness rather
+than catch a real network call.
+
+Each guard closes over the *original* function captured before patching, so
+calling through to the real implementation cannot recurse into the guard.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import socket
 from collections.abc import Iterator
@@ -29,7 +34,24 @@ from app.media import ffmpeg as ffmpeg_module
 from app.pipeline.context import ServiceContext
 from tests import fixtures
 
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0", "testserver"}
+#: Hostnames and literal addresses the guards let through. These are names the
+#: in-process test harness genuinely uses; note that ``0.0.0.0`` is a bind
+#: wildcard, not a loopback destination, so it is deliberately absent — a test
+#: that binds a public interface is not the same thing as a loopback API bind.
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
+
+
+def _is_loopback_host(host: Any) -> bool:
+    """True for a hostname or literal address the guards permit."""
+    if host is None:
+        return True  # getaddrinfo(None, port) resolves the loopback/wildcard locally
+    text = str(host).strip("[]")
+    if text in _ALLOWED_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
 
 
 class NetworkAccessAttempted(AssertionError):
@@ -37,19 +59,24 @@ class NetworkAccessAttempted(AssertionError):
 
 
 def _is_local(address: Any) -> bool:
-    if isinstance(address, str):  # AF_UNIX
+    """True for an address a socket call is allowed to reach."""
+    if isinstance(address, str):  # AF_UNIX path
         return True
     if isinstance(address, tuple) and address:
-        return str(address[0]) in _ALLOWED_HOSTS
+        return _is_loopback_host(address[0])
     return False
 
 
 @pytest.fixture(autouse=True)
 def _block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail any test that attempts an outbound network connection."""
+    # Capture the originals BEFORE patching so the guards can delegate to them
+    # without recursing back into themselves.
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_create = socket.create_connection
+    real_getaddrinfo = socket.getaddrinfo
+    real_gethostbyname = socket.gethostbyname
 
     def guard_connect(self: socket.socket, address: Any) -> Any:
         if not _is_local(address):
@@ -73,13 +100,20 @@ def _block_network(monkeypatch: pytest.MonkeyPatch) -> None:
         return real_create(address, *args, **kwargs)
 
     def guard_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
-        if str(host) not in _ALLOWED_HOSTS:
+        if not _is_loopback_host(host):
             raise NetworkAccessAttempted(f"DNS resolution is forbidden in tests: {host!r}")
-        return socket.getaddrinfo.__wrapped__(host, *args, **kwargs)  # pragma: no cover
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def guard_gethostbyname(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if not _is_loopback_host(host):
+            raise NetworkAccessAttempted(f"DNS resolution is forbidden in tests: {host!r}")
+        return real_gethostbyname(host, *args, **kwargs)
 
     monkeypatch.setattr(socket.socket, "connect", guard_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guard_connect_ex)
     monkeypatch.setattr(socket, "create_connection", guard_create)
+    monkeypatch.setattr(socket, "getaddrinfo", guard_getaddrinfo)
+    monkeypatch.setattr(socket, "gethostbyname", guard_gethostbyname)
 
 
 @pytest.fixture
@@ -90,8 +124,14 @@ def data_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def config(data_root: Path) -> AppConfig:
-    return fixtures.test_config(data_root)
+def config(data_root: Path, tmp_path: Path) -> AppConfig:
+    """Config pinned to a temp data root and the small canonical skeleton profile."""
+    from tests.motion_fixtures import write_test_profile
+
+    profile = write_test_profile(tmp_path / "profiles")
+    return fixtures.test_config(
+        data_root, motion={"skeleton_profile_file": str(profile), "bridge_frames": 12}
+    )
 
 
 @pytest.fixture

@@ -77,6 +77,49 @@ Record the results in `docs/implementation-status.md`. Do not claim a garment
 model works until it has been integrated and tested — a plausible single frame
 is not a working pipeline.
 
+## The character animator
+
+Needed only for the synthetic-master path. Judged separately from the garment
+renderer because the job is different: it invents a whole person rather than
+editing pixels inside a mask.
+
+### Must have
+
+1. **Pose conditioning** that actually follows the supplied skeleton. Test with
+   the composed poses, not the model's demo motions.
+2. **Character identity preservation** from the Hero Character references,
+   across the whole sequence. Drift over 200 frames is the common failure.
+3. **Chunk conditioning**: it must accept previously accepted frames as context
+   and continue from them. A model that cannot will show a seam at every chunk
+   boundary, and `AnimatorCapabilities.supports_context_frames` must report
+   `False` so QC records the boundary honestly.
+4. **A stable background** across chunks. The garment pipeline's
+   `background_preserved` check later assumes the master's background holds
+   still.
+5. **Fixed output framing** at the canonical profile's size. A model that crops
+   or rescales breaks the whole coordinate system.
+6. **8GB feasibility** at a chunk of 8–24 frames with 12–24 context frames.
+
+### Evaluation protocol
+
+On **your** composition, not the model's demos:
+
+1. One chunk. Does the character look like the Hero Character, in the right pose?
+2. Two consecutive chunks. Is the boundary invisible? This is the test most
+   candidates fail.
+3. Determinism: animate the same chunk twice at the same seed, compare frame
+   hashes. Not "looks the same" — identical bytes.
+4. The bridge frames specifically. A generated bridge is the least natural motion
+   in the sequence; if the animator is going to break, it breaks there.
+5. Background stability across the whole sequence.
+6. Wall-clock per chunk × chunk count. A 214-frame composition at 24 frames per
+   chunk is 9 chunks; multiply before committing.
+
+Record the results in `docs/implementation-status.md`. Do not claim photoreal
+character animation works until a workflow has been integrated and reviewed —
+both shipped animator backends report `produces_photoreal: False`, and that is
+the honest value until someone measures otherwise.
+
 ## Preprocessing adapters
 
 Each has a stub at `src/app/adapters/` declaring its output contract, candidate
@@ -107,12 +150,29 @@ false negative there leaks an edit onto the performer's body. Precision matters
 less: a slightly oversized protected mask costs a little garment coverage, which
 is the cheap direction to be wrong in.
 
-### 3. Pose
+### 3. Pose — now load-bearing, not just metadata
 
-Candidates: RTMPose, ViTPose, DWPose, MediaPipe Pose, OpenPose.
+Candidates: DWPose, RTMPose, ViTPose, MediaPipe Pose, OpenPose.
 
-Used as control and QA metadata only — never to regenerate the performer. Judge
-on temporal stability and Windows installability.
+Pose has **two roles** and they set different bars:
+
+* **Garment pipeline**: control and QA metadata only. Temporal stability and
+  Windows installability are what matter.
+* **Motion Composition**: pose *is* the product. Extraction quality directly
+  bounds what a synthetic master can be. Judge additionally on:
+  * **wrist accuracy** — a jittering wrist is the most visible artefact at a
+    motion join, and the anchor score weights hands highest;
+  * **temporal stability of shoulder width** — the normalizer's scale comes from
+    it, and a wandering estimate reads as the body pumping;
+  * **confidence calibration** — the pipeline trusts `confidence` to decide what
+    to interpolate and what to reject, so an over-confident detector is worse
+    than an uncertain one.
+
+Output must be the internal pose JSON format
+(`app.motion.pose_format`). Until an adapter is installed, poses are computed
+externally and imported with `app motion import-pose`, which is how the system
+runs today. A deterministic mock exists for tests and is deliberately **not**
+registered, so no pipeline can pick it up by accident.
 
 ### 4. Depth
 

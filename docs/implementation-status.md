@@ -35,9 +35,34 @@ not done. Nothing below claims a capability that has not been tested.
 | HTTP API + minimal web page | Done | `tests/integration/test_api.py` |
 | Offline verification | Done | `tests/unit/test_offline_and_env.py` |
 | ComfyUI client, contract binding, remote refusal | Done | `tests/unit/test_comfyui.py` |
+| Proxy isolation (`trust_env=False`) | Done | `tests/unit/test_proxy_and_deps.py` |
+| DNS + socket network guard | Done | `tests/unit/test_proxy_and_deps.py` |
+| Pinned, tested dependency versions | Done | `constraints/tested-py311.txt` + tests |
+| **Motion Composition** | | |
+| Pose JSON format + IO | Done | `tests/unit/test_motion_domain.py` |
+| Motion domain schemas | Done | `tests/unit/test_motion_domain.py` |
+| Motion ingestion (no frames extracted) | Done | `tests/integration/test_motion_pipeline.py` |
+| Pose import + validation | Done | same |
+| Canonical normalization | Done | `tests/unit/test_motion_normalize.py` |
+| Deterministic anchor matching | Done | `tests/unit/test_motion_anchors_bridge.py` |
+| Bridge generation + bone-length correction | Done | same |
+| Composition assembly + frame arithmetic | Done | `tests/integration/test_motion_pipeline.py` |
+| Skeleton preview | Done | same (ffmpeg-marked) |
+| Motion QC (11 checks) | Done | same |
+| **Master creation** | | |
+| CharacterAnimatorBackend abstraction | Done | `src/app/backends/animator/base.py` |
+| Mock animator (CPU, deterministic) | Done | `tests/integration/test_motion_pipeline.py` |
+| Chunked animation + context conditioning | Done | same |
+| Chunk resume | Done | same |
+| Master QC (6 checks) | Done | same |
+| Master manifests | Done | same |
+| Operator acceptance gate | Done | same |
+| Motion + master CLI and API | Done | `tests/integration/test_motion_cli_api.py` |
 
-**383 tests pass** with no GPU, no model weights, no ComfyUI and no network.
-`ruff`, `black` and `mypy` are clean.
+**All tests pass** with no GPU, no model weights, no ComfyUI and no network —
+and with proxy environment variables both set and unset. `ruff`, `black` and
+`mypy` are clean. See the run output in the change description for the exact
+count.
 
 ## Interfaces, deliberately not implemented
 
@@ -55,7 +80,31 @@ data for real model output.
 | `optical_flow` | Temporal consistency prior | RAFT, GMFlow, SEA-RAFT, OpenCV DIS |
 | `face_landmarks` | Face-region QC | MediaPipe FaceMesh, InsightFace |
 
+Pose has been promoted from "nice to have" to load-bearing: it is metadata for
+the garment pipeline but the *product* of Motion Composition. The registered
+adapter still reports `not_implemented` and raises; a deterministic
+`MockPoseAdapter` exists for tests and is deliberately **not** registered, so no
+pipeline can pick it up by accident. Poses are imported today.
+
 See [`model-selection-checklist.md`](model-selection-checklist.md).
+
+## The character animator: what is and is not proven
+
+**Proven by tests:** the abstraction, chunk planning (chunks tile the range
+exactly), context-frame conditioning, resume across process restarts, bit-exact
+determinism for identical inputs, manifest completeness, and the acceptance
+gate refusing incomplete or un-QC'd candidates.
+
+**Not proven, because it cannot be:** that any real model animates a Hero
+Character convincingly. The mock animator draws a schematic figure — flat
+shading, a stick-and-polygon body — and is obviously not photoreal. Both shipped
+animator backends report `produces_photoreal: False`, which is the honest value
+until a workflow has been integrated and reviewed.
+
+**Specifically unverified:** whether a real animator holds a background still
+across chunks. The `master_background_consistency` check exists and passes
+against the mock, whose background is fixed by construction — that proves the
+check works, not that a real model will pass it.
 
 ## The ComfyUI backend: what is and is not proven
 
@@ -77,6 +126,40 @@ installation quirks. `prepare()` is designed to fail loudly and specifically
 when that happens.
 
 ## Known limitations
+
+### Pose data is imported, not extracted
+
+The dominant per-motion-reference cost. No pose model is installed, so pose JSON
+is produced externally and imported. A pose adapter is the highest-value
+integration for this phase, and its quality directly bounds what a synthetic
+master can be.
+
+### The bridge is the least natural motion in a composition
+
+It is generated, not observed. The bone-length correction keeps it physically
+coherent and the QC checks bound its drift, but a 10–12 frame bridge between
+genuinely dissimilar anchors will still read as a transition rather than as
+continuous dancing. The anchor score is what keeps that rare; review the preview.
+
+### Anchor matching is 2D and metric, not semantic
+
+It scores joint geometry. It does not know that a hand is about to occlude the
+face, or that a garment hem is mid-swing. Two poses can score identically and cut
+differently. That is what the ranked candidates and the operator override are
+for.
+
+### One motion composition assumes consistent framing
+
+Every segment is normalized to the same canonical profile, so a reference shot
+in a wildly different framing (full body vs head-and-shoulders) will normalize
+to a plausible scale but may place joints outside the target frame. The QC
+framing check catches it after the fact; it is not prevented up front.
+
+### Playback speed does not resample motion
+
+`playback_speed` changes recorded timestamps only. Genuinely retiming motion is
+a separate, lossy decision and is deliberately out of scope rather than done
+badly by default.
 
 ### Masks are authored by hand
 
@@ -154,14 +237,28 @@ not been exercised on Windows hardware here.
 
 ## Remaining for the model-selection phase
 
+**Garment replacement**
+
 1. Choose and integrate a garment renderer; verify determinism and temporal
    coherence on your own footage before trusting it.
 2. Integrate mask propagation — the biggest reduction in manual effort.
 3. Integrate human parsing to generate protected masks automatically, judged on
    recall around hands, hair and skin.
-4. Integrate pose, depth, flow and landmarks as the workflow needs them.
-5. Measure real per-frame time and VRAM on the RTX 5060 and record it.
-6. Decide whether a preview-quality fast path is worth having beside the final
-   quality path.
-7. Re-run the full suite on Windows and fix anything platform-specific.
-8. Update this document with measured results, not expectations.
+
+**Motion Composition**
+
+4. Integrate a pose adapter (DWPose/RTMPose class), judged on wrist accuracy,
+   shoulder-width stability and confidence calibration.
+5. Integrate a character animator and verify: chunk-boundary invisibility,
+   identity stability over 200+ frames, background stability, and determinism by
+   hash comparison. Only then may `produces_photoreal` become `True`.
+6. Measure how a real animator handles the generated bridge frames specifically
+   — they are the least natural motion it will be asked to render.
+
+**Both**
+
+7. Integrate depth, flow, DensePose and landmarks as the workflows need them.
+8. Measure real per-frame and per-chunk time and VRAM on the RTX 5060 and
+   record it here.
+9. Re-run the full suite on Windows and fix anything platform-specific.
+10. Update this document with measured results, not expectations.

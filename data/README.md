@@ -22,6 +22,25 @@ data/
 │   ├── background_plate/          clean background plate, if available
 │   └── intro_cache/               byte-copied intro frames, reused by every job
 │
+├── motion_sources/<motion_source_id>/
+│   └── pose/                      frame_000000.json — POSE DATA ONLY
+│                                  (no reference imagery is ever copied here)
+│
+├── compositions/<composition_id>/
+│   ├── normalized_poses/<src>/    per-source canonical poses
+│   ├── bridge_poses/              generated bridge poses
+│   ├── composed_poses/            the contiguous output sequence (0..N-1)
+│   ├── preview.mp4                skeleton preview (drawn from poses)
+│   ├── manifest.json
+│   └── qc_report.{json,txt}
+│
+├── heroes/<hero_id>/images/       Hero Character reference images
+│
+├── masters/<candidate_id>/
+│   ├── frames/                    candidate master frames
+│   ├── manifest.json
+│   └── qc_report.{json,txt}
+│
 ├── garments/<garment_id>/
 │   └── images/                    front_*.png, back_*.png, side_*.png …
 │
@@ -54,6 +73,11 @@ data/
    index means the same thing in every directory.
 4. Deleting a job directory is safe; deleting a template directory invalidates
    every job that referenced it.
+5. **Motion artifacts contain pose JSON only.** A motion reference's pixels are
+   never copied anywhere under `data/`, and the
+   `no_source_pixels_in_motion_artifacts` QC check fails if an image or video
+   file appears in a composition's pose directories.
+6. An **accepted** master candidate is immutable: re-animating it is refused.
 
 See `docs/data-layout.md` for the full specification and `docs/mask-semantics.md`
 for the mask value conventions.

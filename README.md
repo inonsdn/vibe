@@ -4,6 +4,11 @@ A fully local, model-agnostic system for producing short vertical videos of the
 **same** character performing the **same** dance, with the **same** timing,
 camera, lighting and background — changing only the clothing.
 
+It has two phases. **Motion Composition** builds a Master Human Performance,
+either by ingesting a filmed one or by animating an original Hero Character from
+motion borrowed out of reference clips. **Garment replacement** then re-dresses
+that master, as many times as you like, without ever regenerating the human.
+
 The human is never regenerated. One immutable *Master Human Performance* video
 is the single source of truth for every pixel of the performer. Each render
 touches only the garment region of the reveal segment and restores the original
@@ -17,6 +22,21 @@ bytes everywhere else.
 > Nothing here claims a garment model works, because none has been integrated.
 
 ---
+
+## Two origins for a master
+
+| Origin | How you get it | Usable when |
+| --- | --- | --- |
+| `captured_master` | `app template ingest` an authorized performer video | Immediately |
+| `synthetic_master` | Compose motion, animate a Hero Character, then **accept** it | Only after an operator explicitly accepts it following QC |
+
+A synthetic master borrows **motion only**: the original people, faces, clothes,
+backgrounds and pixels never appear in the result. Motion artifacts are pose
+JSON, and a QC check fails if any image file appears among them. See
+[`docs/motion-composition.md`](docs/motion-composition.md).
+
+Once accepted, a synthetic master is immutable and the garment pipeline cannot
+tell the difference — deliberately.
 
 ## How it works
 
@@ -61,8 +81,8 @@ master.mp4 ──ingest──▶ source_frames/ (immutable, hashed)
 Requires Python 3.11+ and FFmpeg on `PATH`. Nothing else.
 
 ```bash
-# 1. Install
-python -m pip install -e ".[dev]"
+# 1. Install, against the tested dependency pins
+python -m pip install -e ".[dev]" -c constraints/tested-py311.txt
 
 # 2. Check the environment (endpoints, executables, paths, GPU, adapters)
 app doctor
@@ -167,6 +187,20 @@ Full specification: [`docs/mask-semantics.md`](docs/mask-semantics.md).
 | `app job qc` | Automated QC + contact sheets |
 | `app job delete --yes` | Delete exactly one validated job directory |
 | `app job backends` | Backend capabilities and health |
+| `app motion ingest` | Register a motion reference (no frames extracted) |
+| `app motion import-pose` | Attach externally computed pose JSON |
+| `app motion inspect` / `list` | Show and validate a motion reference |
+| `app motion normalize` | Dry-run the canonical transform for one source |
+| `app motion match-anchors` | Rank compatible join frames between two sources |
+| `app motion compose` | Normalize, join, bridge and assemble a control sequence |
+| `app motion preview` | Skeleton preview — review before animating |
+| `app motion qc` | Motion QC (drift, joins, bridge endpoints, no pixels) |
+| `app master register-hero` | Register an original Hero Character |
+| `app master create --origin synthetic` | Create a candidate master |
+| `app master animate` | Animate it in chunks (resumable) |
+| `app master qc` | Master QC + manifest |
+| `app master inspect` | Status, chunks, acceptance state |
+| `app master accept` | Promote a candidate to an immutable master (audited) |
 | `app offline verify` | Prove no cloud/network dependency |
 | `app serve` | Localhost HTTP API |
 
@@ -180,6 +214,7 @@ logs go to stderr, so piping stays clean).
 | Document | Contents |
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | Components, data flow, invariants, design decisions |
+| [`docs/motion-composition.md`](docs/motion-composition.md) | Motion references, normalization, anchors, bridges, the acceptance gate |
 | [`docs/windows-setup.md`](docs/windows-setup.md) | Windows 11 + RTX 5060 8GB setup, step by step |
 | [`docs/data-layout.md`](docs/data-layout.md) | Directory layout and file format specification |
 | [`docs/mask-semantics.md`](docs/mask-semantics.md) | Mask values, families, combination order, authoring |
@@ -208,7 +243,10 @@ logs go to stderr, so piping stays clean).
 ## Development
 
 ```bash
-python -m pip install -e ".[dev]"
+# Install against the tested pins. The constraints file is not optional
+# bookkeeping: unconstrained resolution has installed NumPy 2.5 with OpenCV 5.0,
+# a combination that aborts the interpreter on `import cv2`.
+python -m pip install -e ".[dev]" -c constraints/tested-py311.txt
 
 python -m black src tests          # format
 python -m ruff check src tests     # lint
@@ -218,7 +256,10 @@ python -m pytest                   # tests (no GPU, no weights, no network)
 
 The test suite runs with no GPU, no model weights, no ComfyUI and no network
 access. The no-network rule is *enforced*: `tests/conftest.py` patches the
-socket layer so any outbound connection attempt fails the test that made it.
+socket layer so any outbound connection attempt — or DNS lookup — fails the test
+that made it. Proxy environment variables are covered too: the suite sets
+`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` to deliberately broken values and
+asserts that localhost behaviour is unaffected.
 Fixture videos, frames, masks and product images are all generated
 programmatically — the repository contains no media.
 

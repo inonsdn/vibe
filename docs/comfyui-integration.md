@@ -14,6 +14,7 @@ names, no checkpoint paths, and nothing that triggers a download.
 | No downloads | Only `/system_stats`, `/object_info`, `/prompt`, `/history`, `/queue`, `/interrupt`, `/upload/image`, `/view` are ever called. |
 | Missing nodes reported, not fetched | `prepare()` diffs the workflow's `class_type`s against `/object_info` and fails with the exact list. |
 | Bounded waits | Every request has a timeout; polling has a job deadline (`job_timeout_s`). |
+| Proxy variables ignored | The owned HTTP client sets `trust_env=False`, so `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` cannot route loopback traffic off the machine. |
 | Interruption-safe | `resume()` interrupts any still-running prompt before re-preparing, so a stale prompt cannot write frames behind the pipeline's back. |
 
 ```yaml
@@ -65,6 +66,26 @@ Logical inputs the pipeline can supply:
 
 A contract declaring a name outside this set fails to load, rather than being
 silently ignored at render time.
+
+## Two workflows, two backends
+
+There are now two ComfyUI integrations, sharing the same client and contract
+machinery:
+
+| Backend | Workflow id | Job |
+| --- | --- | --- |
+| `ComfyUIBackend` (renderer) | `garment_replace_placeholder` | Garment pixels inside a mask |
+| `ComfyUIAnimatorBackend` | `character_animate_placeholder` | A whole character, from pose control |
+
+Both refuse remote endpoints, both bind by node title, and both report
+`requires_model_weights: True` with no model integrated. The animator
+additionally reports `produces_photoreal: False` — the honest value until a real
+workflow has been reviewed.
+
+The animator submits **one prompt per chunk** and expects exactly `batch_size`
+frames back, in order. The shipped placeholder returns a single image, so the
+backend rejects it with a clear count mismatch; that is correct behaviour and is
+exercised by the tests.
 
 ## The shipped placeholder
 

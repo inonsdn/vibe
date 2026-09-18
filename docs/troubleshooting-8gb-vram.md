@@ -9,6 +9,33 @@ The mock backend and the entire test suite run on CPU. If you are hitting VRAM
 limits, it is from a ComfyUI workflow you supplied — which means the levers are
 in ComfyUI and in this application's render settings.
 
+## Two pipelines, two sets of levers
+
+| Pipeline | Unit of work | Primary lever |
+| --- | --- | --- |
+| Garment replacement | a frame window | `backend.frame_window` |
+| Character animation | a chunk | `animator.chunk_frames` |
+
+The animation levers mirror the render ones:
+
+```yaml
+animator:
+  chunk_frames: 24        # try 16, then 12, then 8
+  overlap_frames: 16      # context frames handed to the next chunk (12-24)
+  low_vram_mode: true
+  cpu_offload: true
+```
+
+Lower `chunk_frames` first. `overlap_frames` is the continuity budget: below 12
+chunk boundaries start to show, above 24 you are paying for context the model
+cannot use. Both are validated, so a nonsensical pair fails at config load
+rather than mid-animation.
+
+A composition is animated in `ceil(frame_count / chunk_frames)` chunks, and
+`app master animate --max-chunks N` renders only the next N — the animation
+equivalent of `--max-frames`, and the pragmatic way to drive a long animation on
+a machine you are also using.
+
 ## Levers, in order of cost
 
 ### 1. Frame window (free)

@@ -6,6 +6,12 @@ Safety properties, all enforced here rather than by convention:
   operator has explicitly set ``comfyui.allow_remote: true`` *and* added the
   host to ``comfyui.allowed_hosts``. This is checked in the constructor, so a
   misconfigured backend fails before any request is made.
+* The internally owned HTTP client sets ``trust_env=False``, so a request to a
+  loopback ComfyUI can never be routed through ``HTTP_PROXY``, ``HTTPS_PROXY``,
+  ``ALL_PROXY`` or any system proxy/certificate configuration. An operator's
+  corporate proxy settings must not be able to redirect local rendering traffic
+  off the machine, and a SOCKS proxy variable must not turn ``socksio`` into a
+  hard runtime dependency of an offline tool.
 * Only the documented ComfyUI endpoints are called; there is no code path that
   triggers a model download or a custom-node install.
 * Every request has a timeout, and polling has an overall job deadline.
@@ -142,11 +148,14 @@ class ComfyUIClient:
         self._config = config
         self.base_url = assert_local_endpoint(config.base_url, config)
         self._owns_client = client is None
+        # trust_env=False is deliberate: see the module docstring. A caller that
+        # injects its own client owns that decision, so it is left untouched.
         self._client = client or httpx.Client(
             base_url=self.base_url,
             timeout=config.request_timeout_s,
             transport=transport,
             follow_redirects=False,
+            trust_env=False,
             headers={"User-Agent": "garment-replacer/local"},
         )
 

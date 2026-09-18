@@ -214,8 +214,8 @@ def test_app_errors_carry_codes_and_details() -> None:
 def test_migrations_apply_in_order() -> None:
     database = Database.open(None, run_migrations=False)
     applied = database.migrate()
-    assert applied == [1, 2]
-    assert database.schema_version == 2
+    assert applied == [1, 2, 3]
+    assert database.schema_version == 3
     assert database.migrate() == []  # idempotent
     database.close()
 
@@ -264,7 +264,7 @@ def test_foreign_keys_are_enforced() -> None:
 
 def test_schema_version_helper() -> None:
     database = Database.open(None)
-    assert schema_version(database.connection) == 2
+    assert schema_version(database.connection) == 3
     database.close()
 
 

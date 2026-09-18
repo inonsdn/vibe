@@ -41,7 +41,18 @@ The only network code in the repository is an `httpx` client pointed at
 | API bind | `127.0.0.1:8077` | Refused unless `api.allow_remote_bind: true`. |
 
 `assert_local_endpoint()` runs in the ComfyUI client's **constructor**, so a
-misconfigured backend fails before any request can be made — not mid-render. It
+misconfigured backend fails before any request can be made — not mid-render.
+
+The client we own is also built with **`trust_env=False`**. Without it, httpx
+reads `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` from the environment and
+routes loopback traffic through whatever they name — so an operator's corporate
+proxy could intercept local rendering traffic, and an `ALL_PROXY=socks5://…`
+variable made the client refuse to construct at all unless the optional
+`socksio` package happened to be installed. Both were real failures. A client a
+*caller* injects is left untouched: that caller owns the decision.
+`tests/unit/test_proxy_and_deps.py` sets every proxy variable to a deliberately
+broken value and asserts the CLI, the API and backend inspection all still
+work. It
 recognises loopback by IP semantics (`ipaddress.is_loopback`), not by string
 matching, so `127.0.0.2` is correctly local and `10.0.0.5` is correctly not.
 `tests/unit/test_comfyui.py` covers eight non-local URL shapes including
@@ -55,9 +66,17 @@ a network client.
 ## Tests cannot reach the network
 
 `tests/conftest.py` installs an autouse fixture that patches
-`socket.socket.connect`, `connect_ex` and `socket.create_connection`. Any
-attempt to reach a non-loopback address raises `NetworkAccessAttempted` and
-fails the test that made it. Loopback stays permitted because FastAPI's
+`socket.socket.connect`, `connect_ex`, `socket.create_connection`,
+`socket.getaddrinfo` and `socket.gethostbyname`. Any attempt to reach — or even
+*resolve* — a non-loopback address raises `NetworkAccessAttempted` and fails the
+test that made it. Each guard closes over the original function captured before
+patching, so delegating to the real implementation cannot recurse.
+
+Loopback is judged by IP semantics (`ipaddress.is_loopback`), not string
+matching, so `127.0.0.53` is correctly local. `0.0.0.0` is deliberately **not**
+allowed: it is a bind wildcard, not a loopback destination, and treating a
+public-interface bind as equivalent to a loopback API bind is exactly the
+conflation the offline policy exists to prevent. Loopback stays permitted because FastAPI's
 `TestClient` and the ComfyUI transport tests run in-process; blocking it would
 break the harness rather than catch a real call.
 
@@ -109,9 +128,38 @@ There are none to manage — no API keys, tokens or credentials, because there i
 nothing to authenticate to. `.gitignore` excludes `.env*`, `config/local.*` and
 `*.local.yaml` so machine-specific overrides stay out of Git regardless.
 
+## Motion references
+
+A motion reference is a recording of a real person. Three separate protections
+apply:
+
+1. **Its pixels are never copied.** Ingestion probes and hashes the file; it
+   does not extract frames. The reference stays where the operator put it.
+2. **Motion use is asserted explicitly.** `MotionUsageRights.motion_use_authorized`
+   is a separate flag from holding the clip, and composition is *refused*
+   without it. A `depicted_person_consent_ref` field records the consent.
+3. **The guarantee is checked, not assumed.** The
+   `no_source_pixels_in_motion_artifacts` QC check fails if any image or video
+   file appears in a composition's pose directories, and a test plants one to
+   prove the check fires.
+
+The skeleton preview is drawn from pose data on a flat background, so it cannot
+leak a reference person's appearance either.
+
+## Dependency pinning as a safety property
+
+`constraints/tested-py311.txt` pins the versions the suite was actually run
+against. This is not bookkeeping: unconstrained resolution installed NumPy 2.5
+with OpenCV 5.0, and `import cv2` aborted the interpreter with exit code 135
+before a single test could run — a failure that looks like a broken repository.
+`pyproject.toml` carries conservative upper bounds and a test asserts both the
+bounds and the installed versions, so the combination cannot silently return.
+
 ## Consent and provenance
 
-Every template carries a `ConsentRecord`, validated at the schema level:
+Every template carries a `ConsentRecord`, and every **Hero Character** carries
+the same discipline (`subject_kind`, mandatory `adult_confirmed`, a required
+`consent_document_ref` for a `consented_human`). Validated at the schema level:
 
 * `subject_kind` is exactly `synthetic` or `consented_human`
 * `adult_confirmed` must be `true` — a template cannot be persisted otherwise

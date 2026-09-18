@@ -33,7 +33,7 @@ def api_context(client: TestClient):
 def test_health_reports_schema_and_backends(client: TestClient) -> None:
     payload = client.get("/health").json()
     assert payload["status"] == "ok"
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert set(payload["backends"]) == {"mock", "comfyui"}
     assert payload["offline_ok"] is True
 

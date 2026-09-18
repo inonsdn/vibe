@@ -3,8 +3,23 @@
 ## The one idea
 
 **The human is never regenerated.** A single immutable *Master Human
-Performance* video supplies every pixel of the performer, the background, the
-camera and the motion. Identity vectors, pose, depth, flow and landmarks are
+Performance* supplies every pixel of the performer, the background, the camera
+and the motion.
+
+A master now has two possible origins, and the distinction ends the moment it is
+accepted:
+
+``captured_master``
+    An authorized performer video already exists. Ingested with
+    ``app template ingest``. This is the original path, unchanged.
+``synthetic_master``
+    An original Hero Character is animated from a motion composition built out
+    of reference clips. Created with ``app master create --origin synthetic``,
+    and **not usable until an operator explicitly accepts it**.
+
+After acceptance a synthetic master is an immutable ``HumanTemplate`` like any
+other, and the garment pipeline cannot tell the difference — deliberately.
+See [`motion-composition.md`](motion-composition.md). Identity vectors, pose, depth, flow and landmarks are
 auxiliary control and QA metadata — they are never substitutes for source
 pixels.
 
@@ -18,6 +33,23 @@ output_pixel = blend(source, rendered, α)    where the mask allows it
 and the second case is confined to the garment region of the reveal segment.
 
 ## Layers
+
+### Phases
+
+```
+  MOTION COMPOSITION            MASTER CREATION          GARMENT REPLACEMENT
+  (pose data only)              (needs acceptance)       (unchanged)
+
+  reference clips                Hero Character           garment references
+        │                              │                         │
+        ▼                              ▼                         ▼
+  MotionSource                  MasterCandidate            CompatibilityReport
+        │                              │                         │
+        ▼                              ▼                         ▼
+  MotionComposition ─────────▶  operator ACCEPTS ───▶  immutable master ──▶ RenderJob
+        │                              │                                       │
+     preview                        master QC                              render + QC
+```
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -35,6 +67,9 @@ and the second case is confined to the garment region of the reveal segment.
 │    compat_service.py   evaluate + persist + override (audited)        │
 │    render.py           the orchestrator: masks, backend, composite    │
 │    compose.py          intro cache + assembly + encode + manifest    │
+│    motion_ingest.py    register a reference, attach pose data        │
+│    motion_compose.py   normalize -> anchors -> bridge -> assemble    │
+│    master_create.py    chunked animation + the acceptance gate       │
 └───────┬───────────────────────┬──────────────────────┬───────────────┘
         │                       │                      │
         ▼                       ▼                      ▼
@@ -44,7 +79,17 @@ and the second case is confined to the garment region of the reveal segment.
 │  frames.py    │   │  registry.py         │   │  checks.py           │
 │  masks.py     │   │  mock/    (CPU only) │   │  report.py           │
 │  compositor.py│   │  comfyui/ (localhost)│   │  contact_sheet.py    │
-│  assembly.py  │   └──────────────────────┘   └──────────────────────┘
+│  assembly.py  │   │  animator/           │   │  motion_checks.py    │
+└───────────────┘   │    base.py (iface)   │   └──────────────────────┘
+                    │    mock/ comfyui/    │
+┌───────────────┐   └──────────────────────┘
+│ app/motion    │
+│  skeleton.py  │   canonical joint vocabulary (COCO-17)
+│  pose_format  │   the stable internal pose JSON schema
+│  normalize.py │   one canonical body coordinate system
+│  anchors.py   │   deterministic join search
+│  bridge.py    │   cubic Hermite + bone-length correction
+│  preview.py   │   skeleton preview (never source imagery)
 └───────────────┘
         │                       │
         ▼                       ▼
@@ -79,6 +124,11 @@ and the second case is confined to the garment region of the reveal segment.
 | Blocked garments cannot render | `_assert_render_allowed` in `create_job` **and** `render_job` | `test_needs_input_blocks_job_creation`, `test_incompatible_blocks_job_creation` |
 | Paths cannot escape the data root | `DataRoot.resolve` on every operator-supplied path | `tests/unit/test_paths.py` (12 escape vectors) |
 | Remote ComfyUI refused | `assert_local_endpoint` in the client constructor | `test_remote_urls_are_rejected_by_default` (8 URL shapes) |
+| Proxy env cannot reach localhost | `trust_env=False` on the owned HTTP client | `tests/unit/test_proxy_and_deps.py` |
+| No source pixels in motion artifacts | motion ingestion never copies frames | `test_no_source_pixels_are_copied_into_motion_artifacts`, `no_source_pixels_in_motion_artifacts` QC check |
+| Bridge endpoints equal the anchors | endpoints are copied, not evaluated | `test_bridge_endpoints_exactly_match_both_anchors` (tolerance 0) |
+| Composition frame count is exact | `expected_frame_count()` vs declaration vs disk | `test_composition_frame_count_has_no_off_by_one` |
+| A synthetic master needs acceptance | `accept_master` refuses without complete frames + QC | `test_a_candidate_is_not_usable_until_accepted` |
 
 ## Data flow for one render
 
@@ -149,6 +199,27 @@ against a model's forgiving behaviour.
 (`source_frame`, `mask`, `seed`, …) to node *titles*. Re-arranging a graph in
 the UI does not require a code change; renaming a node fails loudly at
 `prepare()` with the exact list of unresolved bindings.
+
+**Motion is normalized independently per source.** Never against the other
+source, so adding a third reference later cannot retroactively change how the
+first two were normalized — and a composition's recorded transforms stay true.
+
+**A bridge is pose data, never blended imagery.** Cross-fading two clips of two
+different people shows both people. Interpolating skeletons cannot, which is why
+the bridge lives in pose space and the character animator renders the result.
+
+**Bone lengths are corrected, not hoped for.** Independent per-joint Hermite
+interpolation stretched bones by 11% on the fixtures. Every interpolated frame
+now passes through a correction that places each joint at the interpolated bone
+length, so rigidity is structural.
+
+**Chunks are conditioned, not concatenated.** Chunks tile the output exactly and
+each receives the previous chunk's accepted tail as context. No frame is
+generated twice, so there is nothing to crossfade at a boundary.
+
+**A candidate master needs a human.** It is the one artifact a model invented
+wholesale, and everything downstream treats a master as ground truth. QC running
+is not acceptance; a person saying so is.
 
 **Two QC tolerance regimes.** Lossless intermediates are checked at
 `max_diff == 0` — there is no excuse for a changed byte. The compressed final

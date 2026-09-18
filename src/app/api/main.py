@@ -16,7 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.api import deps
-from app.api.routers import compatibility, garments, jobs, system, templates
+from app.api.routers import (
+    compatibility,
+    garments,
+    jobs,
+    master,
+    motion,
+    system,
+    templates,
+)
 from app.core.config import AppConfig, load_config
 from app.core.errors import AppError
 from app.core.logging import configure_logging, get_logger, new_correlation_id
@@ -86,6 +94,8 @@ def create_app(config: AppConfig | None = None, **context_kwargs: Any) -> FastAP
     application.include_router(garments.router)
     application.include_router(compatibility.router)
     application.include_router(jobs.router)
+    application.include_router(motion.router)
+    application.include_router(master.router)
 
     if resolved.api.enable_web_ui:
         application.get("/", response_class=HTMLResponse, include_in_schema=False)(_index)

@@ -1,5 +1,24 @@
 # Operator workflow
 
+## Choosing a master origin
+
+Everything below assumes a Master Human Performance exists. There are two ways
+to get one, and they meet at the same place:
+
+| Origin | How | When |
+| --- | --- | --- |
+| **`captured_master`** | Film an authorized performer, then `app template ingest` | You can shoot the performance you want |
+| **`synthetic_master`** | Borrow motion from reference clips, animate an original Hero Character, then accept it | You cannot shoot it, or you want one character across many motions |
+
+A synthetic master is built in [`motion-composition.md`](motion-composition.md)
+and **requires explicit operator acceptance** before it can be used. Once
+accepted it is an immutable master like any other, and everything from "Once per
+character / step 3" below applies unchanged.
+
+The rest of this document describes the captured path. For the synthetic path,
+do the motion phase first, accept the master, then rejoin at step 3 (authoring
+masks).
+
 ## Once per character
 
 You are producing many outfit videos from **one** performance, so this stage is
@@ -224,6 +243,10 @@ while logs go to stderr, so piping stays clean.
 
 | Situation | Do this |
 | --- | --- |
+| Motion animation interrupted | `app master animate <candidate_id> --resume` |
+| Bridge looks wrong in the preview | Re-run `app motion compose` with a different `--anchor` or `--bridge-frames`; it costs seconds, re-animating costs hours |
+| Candidate master QC failed | Fix the composition and re-animate, or `app master reject <id>` so it is not silently reused |
+| Candidate accepted by mistake | An accepted master is immutable. Create a new candidate; the acceptance stays in the audit log |
 | Render interrupted | `app job resume <job_id>` |
 | Render failed at a frame | `app job inspect <job_id>` shows the error and frame; fix the cause, then resume |
 | QC failed on protected pixels | Do not ship. Check the protected masks, then re-render |

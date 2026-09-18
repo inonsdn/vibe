@@ -1,0 +1,46 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "POSE_CONTROL" },
+    "inputs": { "image": "placeholder_pose.png", "upload": "image" }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "HERO_CHARACTER_REFERENCE" },
+    "inputs": { "image": "placeholder_hero.png", "upload": "image" }
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "CONTEXT_PREVIOUS_FRAME" },
+    "inputs": { "image": "placeholder_context.png", "upload": "image" }
+  },
+  "4": {
+    "class_type": "ImageScale",
+    "_meta": { "title": "CANONICAL_OUTPUT_SIZE" },
+    "inputs": {
+      "image": ["2", 0],
+      "upscale_method": "lanczos",
+      "width": 1080,
+      "height": 1920,
+      "crop": "center"
+    }
+  },
+  "5": {
+    "class_type": "ImageBlend",
+    "_meta": { "title": "POSE_OVER_CHARACTER" },
+    "inputs": {
+      "image1": ["4", 0],
+      "image2": ["1", 0],
+      "blend_factor": 0.5,
+      "blend_mode": "normal"
+    }
+  },
+  "6": {
+    "class_type": "SaveImage",
+    "_meta": { "title": "ANIMATED_FRAMES_OUT" },
+    "inputs": {
+      "images": ["5", 0],
+      "filename_prefix": "garment_replacer_motion/placeholder"
+    }
+  }
+}

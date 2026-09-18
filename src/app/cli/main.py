@@ -37,6 +37,32 @@ from app.pipeline import compat_service
 from app.pipeline.compose import ComposeOptions, compose_job
 from app.pipeline.context import ServiceContext
 from app.pipeline.garment_ingest import GarmentIngestOptions, ImageSpec, ingest_garment
+from app.pipeline.master_create import (
+    HeroOptions,
+    MasterCreateOptions,
+    accept_master,
+    animate_master,
+    create_master_candidate,
+    register_hero,
+    reject_master,
+    resume_master,
+    write_master_manifest,
+)
+from app.pipeline.motion_compose import ComposeOptions as MotionComposeOptions
+from app.pipeline.motion_compose import (
+    JoinSpec,
+    SegmentSpec,
+    compose_motion,
+    load_profile,
+    match_anchors,
+    normalize_segment,
+)
+from app.pipeline.motion_ingest import (
+    MotionIngestOptions,
+    import_pose,
+    ingest_motion_source,
+    validate_motion_source,
+)
 from app.pipeline.render import JobCreateOptions, create_job, render_job, resume_job
 from app.pipeline.template_ingest import (
     IngestOptions,
@@ -44,6 +70,7 @@ from app.pipeline.template_ingest import (
     ingest_template,
     validate_template,
 )
+from app.qc.motion_checks import MotionQCOptions, run_master_qc, run_motion_qc
 from app.qc.report import QCOptions, run_qc
 from app.version import APP_NAME, APP_VERSION
 
@@ -71,12 +98,29 @@ job_app = typer.Typer(
 offline_app = typer.Typer(
     help="Verify offline guarantees and the local environment.", no_args_is_help=True
 )
+motion_app = typer.Typer(
+    help=(
+        "Motion Composition: borrow motion from reference clips, normalize it "
+        "into one canonical body frame, and compose a motion-control sequence. "
+        "Pose data only -- no source pixels are ever copied."
+    ),
+    no_args_is_help=True,
+)
+master_app = typer.Typer(
+    help=(
+        "Master Human Performance creation. A synthetic master is a CANDIDATE "
+        "until an operator explicitly accepts it after QC."
+    ),
+    no_args_is_help=True,
+)
 
 app.add_typer(template_app, name="template")
 app.add_typer(garment_app, name="garment")
 app.add_typer(compat_app, name="compatibility")
 app.add_typer(job_app, name="job")
 app.add_typer(offline_app, name="offline")
+app.add_typer(motion_app, name="motion")
+app.add_typer(master_app, name="master")
 
 
 # ---------------------------------------------------------------------------
@@ -988,6 +1032,676 @@ def job_backends(json_output: JsonFlag = False) -> None:
         if not health["healthy"]:
             lines.append(f"           {health['detail']}")
     _emit(payload, "\n".join(lines), force_json=json_output)
+
+
+# ---------------------------------------------------------------------------
+# motion
+# ---------------------------------------------------------------------------
+@motion_app.command("ingest")
+def motion_ingest(
+    source: Annotated[Path, typer.Argument(help="Motion reference video file.")],
+    name: Annotated[str, typer.Option("--name", help="Display name for this reference.")],
+    start_frame: Annotated[int, typer.Option("--start-frame")] = 0,
+    end_frame: Annotated[
+        int | None, typer.Option("--end-frame", help="Exclusive end (default: whole clip).")
+    ] = None,
+    motion_use_authorized: Annotated[
+        bool,
+        typer.Option(
+            "--motion-use-authorized",
+            help="Assert that deriving motion from this clip is authorized. "
+            "Required before it can be composed.",
+        ),
+    ] = False,
+    rights_holder: Annotated[str | None, typer.Option("--rights-holder")] = None,
+    license_text: Annotated[str | None, typer.Option("--license")] = None,
+    acquired_from: Annotated[str | None, typer.Option("--acquired-from")] = None,
+    consent_ref: Annotated[
+        str | None, typer.Option("--consent-ref", help="Consent reference for the depicted person.")
+    ] = None,
+    motion_id: Annotated[str | None, typer.Option("--motion-id")] = None,
+    allow_vfr: Annotated[bool, typer.Option("--allow-vfr")] = False,
+    json_output: JsonFlag = False,
+) -> None:
+    """Register a motion reference. Probes and hashes it; copies no imagery."""
+    with _context() as context:
+        result = _run(
+            ingest_motion_source,
+            context,
+            source,
+            MotionIngestOptions(
+                display_name=name,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                motion_source_id=motion_id,
+                motion_use_authorized=motion_use_authorized,
+                rights_holder=rights_holder,
+                license=license_text,
+                acquired_from=acquired_from,
+                depicted_person_consent_ref=consent_ref,
+                allow_vfr=allow_vfr,
+            ),
+        )
+        record = result.source
+        lines = [
+            f"motion     {record.id} v{record.version}  ({record.display_name})",
+            f"video      {record.video.width}x{record.video.height} @ "
+            f"{record.video.fps:.3f}fps  {record.video.frame_count} frames",
+            f"range      [{record.selected_range.start}, {record.selected_range.end})",
+            f"source     sha256 {record.source_sha256[:16]}...",
+            f"pose dir   {record.pose_dir}",
+            f"status     {record.status.value}",
+            "",
+            "No frames were extracted: this reference contributes motion only.",
+            "",
+            "Next: attach pose data:",
+            f"  app motion import-pose {record.id} --from <dir>",
+        ]
+        for warning in result.warnings:
+            lines.append(f"warning: {warning}")
+        _emit(result.as_dict(), "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("import-pose")
+def motion_import_pose(
+    motion_id: Annotated[str, typer.Argument()],
+    source: Annotated[Path, typer.Option("--from", help="Directory of frame_NNNNNN.json poses.")],
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    overwrite: Annotated[bool, typer.Option("--overwrite")] = False,
+    json_output: JsonFlag = False,
+) -> None:
+    """Import precomputed pose JSON for a motion reference."""
+    with _context() as context:
+        result = _run(import_pose, context, motion_id, source, version=version, overwrite=overwrite)
+        lines = [
+            f"imported   {len(result.imported)} pose frame(s)",
+            f"pose sha   {result.pose_sha256[:16]}...",
+            f"confidence mean={result.quality.mean_joint_confidence:.3f} "
+            f"min={result.quality.min_joint_confidence:.3f}",
+            f"shoulders  median {result.quality.median_shoulder_width_px}px",
+        ]
+        if result.imported:
+            lines.insert(1, f"range      {min(result.imported)}..{max(result.imported)}")
+        for skip in result.skipped[:8]:
+            lines.append(f"skipped    {skip}")
+        _emit(result.as_dict(), "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("inspect")
+def motion_inspect(
+    motion_id: Annotated[str, typer.Argument()],
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    validate: Annotated[bool, typer.Option("--validate/--no-validate")] = True,
+    json_output: JsonFlag = False,
+) -> None:
+    """Show a motion reference and validate its pose data."""
+    with _context() as context:
+        record = _run(context.repos.motion_sources.get, motion_id, version)
+        payload: dict[str, Any] = {"motion_source": record.to_json_dict()}
+        lines = [
+            f"motion     {record.id} v{record.version}  ({record.display_name})",
+            f"status     {record.status.value}",
+            f"video      {record.video.width}x{record.video.height} @ "
+            f"{record.video.fps:.3f}fps",
+            f"range      [{record.selected_range.start}, {record.selected_range.end})",
+            f"pose       {record.pose_origin} format={record.pose_format} "
+            f"frames={record.quality.frames_with_pose}",
+            f"rights     authorized={record.usage_rights.motion_use_authorized} "
+            f"holder={record.usage_rights.rights_holder or '-'}",
+        ]
+        if validate:
+            validation = _run(validate_motion_source, context, record.id, version=record.version)
+            payload["validation"] = validation.as_dict()
+            lines.append("")
+            lines.append(f"validation {'OK' if validation.ok else 'PROBLEMS'}")
+            for problem in validation.problems:
+                lines.append(f"  problem: {problem}")
+            for warning in validation.warnings:
+                lines.append(f"  warning: {warning}")
+        _emit(payload, "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("list")
+def motion_list(json_output: JsonFlag = False) -> None:
+    """List motion references."""
+    with _context() as context:
+        sources = context.repos.motion_sources.list()
+        lines = [f"{len(sources)} motion reference(s)"]
+        for record in sources:
+            lines.append(
+                f"  {record.id} v{record.version:<3} {record.status.value:<16} "
+                f"{record.display_name}"
+            )
+        _emit(
+            {"motion_sources": [s.to_json_dict() for s in sources]},
+            "\n".join(lines),
+            force_json=json_output,
+        )
+
+
+@motion_app.command("normalize")
+def motion_normalize(
+    motion_id: Annotated[str, typer.Argument()],
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    start_frame: Annotated[int | None, typer.Option("--start-frame")] = None,
+    end_frame: Annotated[int | None, typer.Option("--end-frame")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Normalize one motion reference into the canonical body frame (dry run).
+
+    Reports the transform that would be applied, without writing a composition.
+    Useful for checking that two differently-scaled sources land on the same
+    canonical size before composing them.
+    """
+    with _context() as context:
+        profile = _run(load_profile, context)
+        record = _run(context.repos.motion_sources.get, motion_id, version)
+        segment = _run(
+            normalize_segment,
+            context,
+            SegmentSpec(
+                motion_source_id=record.id,
+                motion_source_version=record.version,
+                start_frame=start_frame,
+                end_frame=end_frame,
+            ),
+            profile,
+            output_fps=record.video.fps,
+        )
+        transform = segment.transform
+        payload = {
+            "motion_source_id": record.id,
+            "frames": len(segment.poses),
+            "canonical_transform": transform.model_dump(mode="json"),
+            "profile": f"{profile.id}@v{profile.version}",
+        }
+        lines = [
+            f"motion     {record.id} v{record.version}",
+            f"profile    {profile.id}@v{profile.version}",
+            f"frames     {len(segment.poses)}",
+            f"source     shoulders {transform.source_shoulder_width:.1f}px  "
+            f"torso {transform.source_torso_length:.1f}px",
+            f"scale      x{transform.base_scale:.4f} -> canonical shoulders "
+            f"{profile.canonical_shoulder_width:.0f}px",
+            f"offset     mean ({transform.mean_offset_x:.1f}, {transform.mean_offset_y:.1f})",
+            f"interpolated {len(transform.interpolated_frames)} frame(s)",
+        ]
+        for warning in segment.warnings:
+            lines.append(f"warning: {warning}")
+        _emit(payload, "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("match-anchors")
+def motion_match_anchors(
+    prev_motion: Annotated[str, typer.Option("--prev", help="Previous segment's motion id.")],
+    next_motion: Annotated[str, typer.Option("--next", help="Next segment's motion id.")],
+    prev_start: Annotated[int | None, typer.Option("--prev-start")] = None,
+    prev_end: Annotated[int | None, typer.Option("--prev-end")] = None,
+    next_start: Annotated[int | None, typer.Option("--next-start")] = None,
+    next_end: Annotated[int | None, typer.Option("--next-end")] = None,
+    top: Annotated[int, typer.Option("--top", help="How many candidates to show.")] = 5,
+    json_output: JsonFlag = False,
+) -> None:
+    """Rank compatible join frames between two motion references."""
+    with _context() as context:
+        profile = _run(load_profile, context)
+        prev_segment = _run(
+            normalize_segment,
+            context,
+            SegmentSpec(motion_source_id=prev_motion, start_frame=prev_start, end_frame=prev_end),
+            profile,
+            output_fps=context.config.video.fps,
+        )
+        next_segment = _run(
+            normalize_segment,
+            context,
+            SegmentSpec(motion_source_id=next_motion, start_frame=next_start, end_frame=next_end),
+            profile,
+            output_fps=context.config.video.fps,
+        )
+        candidates = _run(match_anchors, context, prev_segment, next_segment, profile)
+        shown = candidates[:top]
+        lines = [
+            f"{len(candidates)} candidate(s); best first",
+            "",
+            f"{'rank':<5}{'prev':>7}{'next':>7}{'score':>9}{'root':>9}"
+            f"{'hands':>9}{'scale':>9}  ok",
+        ]
+        for rank, candidate in enumerate(shown, start=1):
+            lines.append(
+                f"{rank:<5}{candidate.prev_frame:>7}{candidate.next_frame:>7}"
+                f"{candidate.score:>9.4f}{candidate.root_delta:>9.2f}"
+                f"{candidate.hand_distance:>9.2f}{candidate.shoulder_scale_delta:>9.4f}"
+                f"  {'yes' if candidate.acceptable else 'NO'}"
+            )
+        if shown and shown[0].warnings:
+            lines.append("")
+            for warning in shown[0].warnings:
+                lines.append(f"warning (best): {warning}")
+        _emit(
+            {"candidates": [c.as_dict() for c in shown], "total": len(candidates)},
+            "\n".join(lines),
+            force_json=json_output,
+        )
+
+
+@motion_app.command("compose")
+def motion_compose_cmd(
+    name: Annotated[str, typer.Option("--name", help="Display name for the composition.")],
+    segment: Annotated[
+        list[str],
+        typer.Option(
+            "--segment",
+            help="A segment as motion_id[:start[:end]] (repeatable, in order). "
+            "Example: --segment mot_a:0:168 --segment mot_b:12:210",
+        ),
+    ],
+    bridge_frames: Annotated[
+        int | None, typer.Option("--bridge-frames", help="Bridge length (10-12 supported).")
+    ] = None,
+    anchor: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--anchor",
+            help="Pin a join as prev_frame:next_frame (repeatable, one per join). "
+            "Omit to search automatically.",
+        ),
+    ] = None,
+    output_fps: Annotated[float | None, typer.Option("--fps")] = None,
+    no_preview: Annotated[bool, typer.Option("--no-preview")] = False,
+    composition_id: Annotated[str | None, typer.Option("--composition-id")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Normalize, match anchors, bridge and assemble a motion-control sequence."""
+    specs: list[SegmentSpec] = []
+    for entry in segment:
+        parts = entry.split(":")
+        if not parts[0]:
+            typer.secho(
+                f"--segment needs a motion id, got {entry!r}", fg=typer.colors.RED, err=True
+            )
+            raise typer.Exit(code=2)
+        specs.append(
+            SegmentSpec(
+                motion_source_id=parts[0],
+                start_frame=int(parts[1]) if len(parts) > 1 and parts[1] else None,
+                end_frame=int(parts[2]) if len(parts) > 2 and parts[2] else None,
+            )
+        )
+
+    joins: list[JoinSpec] = []
+    for entry in anchor or []:
+        parts = entry.split(":")
+        if len(parts) != 2 or not all(parts):
+            typer.secho(
+                f"--anchor must be prev_frame:next_frame, got {entry!r}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        joins.append(
+            JoinSpec(
+                prev_frame=int(parts[0]),
+                next_frame=int(parts[1]),
+                bridge_frames=bridge_frames,
+            )
+        )
+    if not joins and bridge_frames is not None:
+        joins = [JoinSpec(bridge_frames=bridge_frames) for _ in range(len(specs) - 1)]
+
+    with _context() as context:
+        result = _run(
+            compose_motion,
+            context,
+            MotionComposeOptions(
+                display_name=name,
+                segments=specs,
+                joins=joins,
+                output_fps=output_fps,
+                composition_id=composition_id,
+                make_preview=not no_preview,
+            ),
+        )
+        composition = result.composition
+        lines = [
+            f"composition {composition.id} v{composition.version}",
+            f"segments    {len(composition.segments)}   joins {len(composition.joins)}",
+            f"frames      {composition.output_frame_count} @ {composition.output_fps:.3f}fps",
+            f"profile     {composition.skeleton_profile_id}"
+            f"@v{composition.skeleton_profile_version}",
+            f"poses       {composition.composed_pose_dir}",
+            f"preview     {composition.preview_path or '-'}",
+            f"manifest    {composition.manifest_path}",
+        ]
+        for index, join in enumerate(composition.joins):
+            lines.append(
+                f"join {index}      frames {join.prev_source_frame} -> "
+                f"{join.next_source_frame}  bridge {join.bridge_frame_count}  "
+                f"score {join.pose_distance_score:.4f}"
+                f"{'' if join.accepted else '  (REVIEW)'}"
+            )
+        for warning in result.warnings:
+            lines.append(f"warning: {warning}")
+        lines.append("")
+        lines.append(f"Next: app motion preview {composition.id}")
+        _emit(result.as_dict(), "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("preview")
+def motion_preview(
+    composition_id_arg: Annotated[str, typer.Argument(metavar="COMPOSITION_ID")],
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Show (and if needed re-render) the skeleton preview for a composition."""
+    from app.motion.pose_format import load_pose_sequence
+    from app.pipeline.motion_compose import _render_preview
+
+    with _context() as context:
+        composition = _run(context.repos.compositions.get, composition_id_arg, version)
+        poses = load_pose_sequence(
+            context.absolute(composition.composed_pose_dir),
+            range(composition.output_frame_count),
+        )
+        anchors = {p.frame_index for p in poses if p.origin.value == "bridge"}
+        root = context.absolute(composition.composed_pose_dir).parent
+        info = _run(_render_preview, context, composition, poses, anchors, root)
+        context.repos.compositions.save(
+            composition.model_copy(update={"preview_path": context.relative(info["path"])})
+        )
+        lines = [
+            f"preview     {info['path']}",
+            f"frames      {info['frame_count']} @ {info['fps']:.3f}fps",
+            f"range       {info['first_frame']}..{info['last_frame']}",
+            "",
+            "Review the bridge before animating: it is far cheaper to fix here.",
+        ]
+        _emit(info, "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("qc")
+def motion_qc(
+    composition_id_arg: Annotated[str, typer.Argument(metavar="COMPOSITION_ID")],
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Run motion QC on a composed sequence."""
+    from app.qc.report import render_text_report
+
+    with _context() as context:
+        report = _run(run_motion_qc, context, composition_id_arg, version=version)
+        if state.json_output or json_output:
+            typer.echo(json.dumps(report.as_dict(), indent=2, sort_keys=True, default=str))
+        else:
+            typer.echo(render_text_report(report))
+        if not report.passed:
+            raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# master
+# ---------------------------------------------------------------------------
+@master_app.command("register-hero")
+def master_register_hero(
+    name: Annotated[str, typer.Option("--name", help="Hero Character display name.")],
+    image: Annotated[list[Path], typer.Option("--image", help="Reference image (repeatable).")],
+    subject_kind: Annotated[
+        str, typer.Option("--subject-kind", help="synthetic | consented_human")
+    ] = "synthetic",
+    consent_document: Annotated[str | None, typer.Option("--consent-document")] = None,
+    rights_holder: Annotated[str | None, typer.Option("--rights-holder")] = None,
+    hero_id: Annotated[str | None, typer.Option("--hero-id")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Register an original Hero Character from reference images."""
+    with _context() as context:
+        hero = _run(
+            register_hero,
+            context,
+            HeroOptions(
+                display_name=name,
+                reference_images=list(image),
+                subject_kind=subject_kind,
+                consent_document_ref=consent_document,
+                rights_holder=rights_holder,
+                hero_id=hero_id,
+            ),
+        )
+        lines = [
+            f"hero       {hero.id} v{hero.version}  ({hero.display_name})",
+            f"subject    {hero.subject_kind}  adult={hero.adult_confirmed}",
+            f"references {len(hero.reference_images)}",
+        ]
+        _emit({"hero": hero.to_json_dict()}, "\n".join(lines), force_json=json_output)
+
+
+@master_app.command("create")
+def master_create(
+    name: Annotated[str, typer.Option("--name")],
+    composition: Annotated[str, typer.Option("--composition", help="Motion composition id.")],
+    hero: Annotated[str, typer.Option("--hero", help="Hero Character id.")],
+    origin: Annotated[
+        str,
+        typer.Option(
+            "--origin",
+            help=(
+                "Only 'synthetic' is supported here; a captured master is "
+                "ingested with `app template ingest`."
+            ),
+        ),
+    ] = "synthetic",
+    backend: Annotated[str, typer.Option("--backend", help="mock | comfyui")] = "mock",
+    seed: Annotated[int | None, typer.Option("--seed")] = None,
+    chunk_frames: Annotated[int | None, typer.Option("--chunk-frames")] = None,
+    overlap_frames: Annotated[int | None, typer.Option("--overlap-frames")] = None,
+    candidate_id: Annotated[str | None, typer.Option("--candidate-id")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Create a candidate synthetic master from a composition and a Hero Character."""
+    if origin != "synthetic":
+        typer.secho(
+            f"--origin {origin!r} is not creatable here. A captured master is "
+            "ingested directly with `app template ingest`.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    with _context() as context:
+        candidate = _run(
+            create_master_candidate,
+            context,
+            MasterCreateOptions(
+                display_name=name,
+                composition_id=composition,
+                hero_character_id=hero,
+                backend_name=backend,
+                seed=seed,
+                chunk_frames=chunk_frames,
+                overlap_frames=overlap_frames,
+                candidate_id=candidate_id,
+            ),
+        )
+        lines = [
+            f"candidate  {candidate.id} v{candidate.version}",
+            f"origin     {candidate.origin.value}",
+            f"from       {candidate.composition_id}@v{candidate.composition_version}",
+            f"hero       {candidate.hero_character_id}@v{candidate.hero_character_version}",
+            f"backend    {candidate.backend_name} v{candidate.backend_version}",
+            f"frames     {candidate.frame_count} @ {candidate.fps:.3f}fps  "
+            f"{candidate.width}x{candidate.height}",
+            f"chunks     {candidate.settings['chunk_frames']} frames, "
+            f"{candidate.settings['overlap_frames']} context frames",
+            f"seed       {candidate.seed}",
+            f"status     {candidate.status.value}",
+            "",
+            f"Next: app master animate {candidate.id}",
+        ]
+        _emit({"candidate": candidate.to_json_dict()}, "\n".join(lines), force_json=json_output)
+
+
+@master_app.command("animate")
+def master_animate(
+    candidate_id_arg: Annotated[str, typer.Argument(metavar="CANDIDATE_ID")],
+    backend: Annotated[str | None, typer.Option("--backend")] = None,
+    max_chunks: Annotated[int | None, typer.Option("--max-chunks")] = None,
+    resume: Annotated[bool, typer.Option("--resume", help="Skip completed chunks.")] = False,
+    json_output: JsonFlag = False,
+) -> None:
+    """Animate a candidate master, chunk by chunk."""
+    with _context() as context:
+        function = resume_master if resume else animate_master
+        result = _run(
+            function, context, candidate_id_arg, backend_name=backend, max_chunks=max_chunks
+        )
+        candidate = result.candidate
+        lines = [
+            f"candidate  {candidate.id}",
+            f"status     {candidate.status.value}",
+            f"animated   {len(result.animated_chunks)} chunk(s)",
+            f"skipped    {len(result.skipped_chunks)} already-complete chunk(s)",
+            f"frames     {len(candidate.completed_chunk_frames())}/{candidate.frame_count}",
+            "",
+            f"Next: app master qc {candidate.id}",
+        ]
+        _emit(result.as_dict(), "\n".join(lines), force_json=json_output)
+
+
+@master_app.command("qc")
+def master_qc(
+    candidate_id_arg: Annotated[str, typer.Argument(metavar="CANDIDATE_ID")],
+    json_output: JsonFlag = False,
+) -> None:
+    """Run QC on a candidate master and write its manifest."""
+    from app.qc.report import render_text_report
+
+    with _context() as context:
+        candidate = _run(context.repos.masters.get, candidate_id_arg)
+        _run(write_master_manifest, context, candidate)
+        report = _run(run_master_qc, context, candidate_id_arg, options=MotionQCOptions())
+        if state.json_output or json_output:
+            typer.echo(json.dumps(report.as_dict(), indent=2, sort_keys=True, default=str))
+        else:
+            typer.echo(render_text_report(report))
+            typer.echo(
+                "This candidate is NOT a master until accepted:\n"
+                f'  app master accept {candidate_id_arg} --by <name> --reason "..."'
+            )
+        if not report.passed:
+            raise typer.Exit(code=1)
+
+
+@master_app.command("inspect")
+def master_inspect(
+    candidate_id_arg: Annotated[str, typer.Argument(metavar="CANDIDATE_ID")],
+    json_output: JsonFlag = False,
+) -> None:
+    """Show a candidate master's status, chunks and acceptance state."""
+    with _context() as context:
+        candidate = _run(context.repos.masters.get, candidate_id_arg)
+        done = candidate.completed_chunk_frames()
+        lines = [
+            f"candidate  {candidate.id} v{candidate.version}  ({candidate.display_name})",
+            f"origin     {candidate.origin.value}",
+            f"status     {candidate.status.value}",
+            f"composition {candidate.composition_id}@v{candidate.composition_version}",
+            f"hero       {candidate.hero_character_id}@v{candidate.hero_character_version}",
+            f"backend    {candidate.backend_name} v{candidate.backend_version}",
+            f"frames     {len(done)}/{candidate.frame_count}",
+            f"chunks     {len(candidate.chunks)}",
+            f"manifest   {candidate.manifest_path or '-'}",
+            f"qc report  {candidate.qc_report_path or '-'}",
+            f"accepted   {candidate.is_accepted}",
+        ]
+        if candidate.acceptance:
+            lines.append(
+                f"  by {candidate.acceptance.accepted_by} at "
+                f"{candidate.acceptance.accepted_at.isoformat()}"
+            )
+            lines.append(f"  reason: {candidate.acceptance.reason}")
+        if not candidate.is_accepted:
+            lines.append("")
+            lines.append("This candidate cannot be used as a master until it is accepted.")
+        _emit(
+            {
+                "candidate": candidate.to_json_dict(),
+                "frames_done": len(done),
+                "remaining_frames": len(candidate.remaining_frames()),
+            },
+            "\n".join(lines),
+            force_json=json_output,
+        )
+
+
+@master_app.command("accept")
+def master_accept(
+    candidate_id_arg: Annotated[str, typer.Argument(metavar="CANDIDATE_ID")],
+    accepted_by: Annotated[str, typer.Option("--by", help="Who is accepting this master.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why (10+ characters, audited).")],
+    allow_qc_failure: Annotated[
+        bool,
+        typer.Option("--allow-qc-failure", help="Accept despite failing QC (audited)."),
+    ] = False,
+    json_output: JsonFlag = False,
+) -> None:
+    """Accept a candidate, making it an immutable Master Human Performance."""
+    with _context() as context:
+        candidate = _run(
+            accept_master,
+            context,
+            candidate_id_arg,
+            accepted_by=accepted_by,
+            reason=reason,
+            require_qc_pass=not allow_qc_failure,
+        )
+        lines = [
+            f"accepted   {candidate.id}",
+            f"by         {accepted_by}",
+            f"qc passed  {candidate.acceptance.qc_passed if candidate.acceptance else False}",
+            f"frames     {candidate.frame_count}",
+            "",
+            "This master is now immutable. The garment pipeline operates on it "
+            "exactly as it does on a captured master.",
+        ]
+        _emit({"candidate": candidate.to_json_dict()}, "\n".join(lines), force_json=json_output)
+
+
+@master_app.command("reject")
+def master_reject(
+    candidate_id_arg: Annotated[str, typer.Argument(metavar="CANDIDATE_ID")],
+    rejected_by: Annotated[str, typer.Option("--by")],
+    reason: Annotated[str, typer.Option("--reason")],
+    json_output: JsonFlag = False,
+) -> None:
+    """Record an explicit rejection so a bad candidate is not silently reused."""
+    with _context() as context:
+        candidate = _run(
+            reject_master, context, candidate_id_arg, rejected_by=rejected_by, reason=reason
+        )
+        _emit(
+            {"candidate": candidate.to_json_dict()},
+            f"rejected   {candidate.id}\nby         {rejected_by}",
+            force_json=json_output,
+        )
+
+
+@master_app.command("list")
+def master_list(json_output: JsonFlag = False) -> None:
+    """List candidate masters."""
+    with _context() as context:
+        candidates = context.repos.masters.list()
+        lines = [f"{len(candidates)} candidate(s)"]
+        for candidate in candidates:
+            lines.append(
+                f"  {candidate.id} {candidate.status.value:<22} "
+                f"{'ACCEPTED' if candidate.is_accepted else 'candidate':<10} "
+                f"{candidate.frame_count:>5} frames  {candidate.display_name}"
+            )
+        _emit(
+            {"candidates": [c.to_json_dict() for c in candidates]},
+            "\n".join(lines),
+            force_json=json_output,
+        )
 
 
 @app.command("serve")

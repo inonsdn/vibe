@@ -1,0 +1,78 @@
+# Prototype motion composition — EXAMPLE, not production configuration.
+#
+# This file documents the current prototype's intended shape so it can be
+# reproduced and discussed. It is deliberately an example rather than a
+# hard-coded fact in the codebase: clip numbering, frame ranges and character
+# choice are production decisions that change, and nothing in src/ reads this
+# file.
+#
+# Use it as the source for CLI arguments, or copy it and adapt.
+
+display_name: "Prototype composition v1"
+
+# --- motion references ---------------------------------------------------
+# Two reference videos featuring DIFFERENT people, DIFFERENT backgrounds,
+# DIFFERENT framing and DIFFERENT apparent body scale. Only their motion is
+# used; no pixel from either enters the master.
+motion_sources:
+  - alias: motion_a
+    display_name: "Motion A (source clip 3)"
+    # Replace with the real path on your machine.
+    video: "D:/motion_refs/clip_03.mp4"
+    start_frame: 0
+    end_frame: 168          # approximately frames 0-168
+    fps: 30
+    motion_use_authorized: true
+    rights_holder: "<fill in>"
+    license: "<fill in>"
+
+  - alias: motion_b
+    display_name: "Motion B (source clip 2)"
+    video: "D:/motion_refs/clip_02.mp4"
+    start_frame: 12
+    end_frame: 210          # approximately frames 12-210
+    fps: 30
+    motion_use_authorized: true
+    rights_holder: "<fill in>"
+    license: "<fill in>"
+
+# --- composition ---------------------------------------------------------
+composition:
+  output_fps: 30
+  segments:
+    - source: motion_a
+      # Frontal motion throughout, so only the front garment view is required.
+      exposed_views: [front]
+    - source: motion_b
+      exposed_views: [front]
+  joins:
+    - # Leave prev_frame/next_frame unset to let the anchor matcher choose, then
+      # review the ranked candidates and pin the choice here for reproducibility.
+      prev_frame: null
+      next_frame: null
+      bridge_frames: 12     # prototype supports 10-12
+
+# --- framing -------------------------------------------------------------
+# Vertical 9:16, head through knees or mid-thigh. These values live in
+# config/canonical_skeleton.v1.yaml; repeated here for readability only.
+framing:
+  aspect: "9:16"
+  target_width: 1080
+  target_height: 1920
+  visible_body: "head through knees/mid-thigh"
+  motion_character: "mostly frontal"
+
+# --- character -----------------------------------------------------------
+hero_character:
+  display_name: "Hero Character v1"
+  subject_kind: synthetic
+  reference_images:
+    - "D:/hero/hero_v1_front.png"
+    - "D:/hero/hero_v1_three_quarter.png"
+
+# --- hard constraint -----------------------------------------------------
+constraints:
+  no_source_pixels_in_master: true
+  # Enforced structurally: motion ingestion never copies frames, and the
+  # no_source_pixels_in_motion_artifacts QC check fails if any image file
+  # appears in a composition's pose directories.

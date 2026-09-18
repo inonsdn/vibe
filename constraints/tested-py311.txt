@@ -1,0 +1,41 @@
+# Tested dependency pins — Python 3.11
+#
+# Install with:
+#     python -m pip install -e ".[dev]" -c constraints/tested-py311.txt
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Unconstrained resolution has installed NumPy 2.5.x together with OpenCV
+# 5.0.x. That combination aborted the interpreter on `import cv2` with exit
+# code 135 (SIGBUS) before a single test could run — a failure that looks like
+# a broken repository but is a dependency-resolution problem.
+#
+# The pins below are the exact versions this project's test suite was run
+# against. They are a floor for reproducibility, not a claim that nothing else
+# works: pyproject.toml carries deliberately conservative ranges
+# (numpy>=1.26,<2.3, opencv-python-headless>=4.9,<5) and this file pins inside
+# them.
+#
+# Compatibility with NumPy 2.3+ or OpenCV 5.x is UNTESTED and therefore not
+# claimed. When you are ready to move the ceiling: raise the bound in
+# pyproject.toml, update these pins, and re-run the full suite on Python 3.11
+# on Windows 11 before relying on it.
+
+# --- media stack (the pair that actually matters) ---
+numpy==2.2.6
+opencv-python-headless==4.14.0.94
+
+# --- application runtime ---
+pydantic==2.13.5
+fastapi==0.141.1
+uvicorn==0.53.0
+typer==0.27.2
+PyYAML==6.0.1
+httpx==0.28.1
+python-multipart==0.0.32
+
+# --- development tooling ---
+pytest==9.1.1
+ruff==0.16.8
+mypy==2.3.1
+black==26.5.1

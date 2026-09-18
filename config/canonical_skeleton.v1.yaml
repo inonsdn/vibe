@@ -1,0 +1,47 @@
+# Canonical skeleton profile, version 1.
+#
+# This is the single body coordinate system every motion reference is
+# normalized into. Two clips of two different people, at different distances,
+# framed differently, become comparable ONLY because both are mapped through
+# these numbers.
+#
+# Changing any value here changes what "the same pose" means, so treat it as a
+# versioned contract: copy to canonical_skeleton.v2.yaml and bump `version`
+# rather than editing a profile that existing compositions reference.
+
+id: canonical_v1
+version: 1
+skeleton_format: coco_17
+
+# Empty means the incoming pose already uses the internal joint names.
+# A future adapter with different names maps them here.
+joint_mapping: {}
+
+# The root is the midpoint of the shoulder centre and the hip centre. Preferred
+# over the hip centre alone: far less sensitive to one mis-detected hip, which
+# is the common failure mode.
+root_joint: torso_center
+
+# --- canonical body size, in target-frame pixels ---
+# Chosen for vertical 9:16 framing showing head through knees/mid-thigh.
+canonical_shoulder_width: 300.0
+canonical_torso_length: 420.0
+
+# --- target frame ---
+target_width: 1080
+target_height: 1920
+
+# Body centre sits below the middle so the head has headroom and the legs reach
+# the lower third: the framing the prototype calls for.
+target_body_center: [540.0, 1010.0]
+target_head_position: [540.0, 430.0]
+target_head_scale: 96.0
+
+# --- robustness ---
+confidence_threshold: 0.35          # below this a joint is treated as missing
+high_confidence_threshold: 0.6      # used where a firm detection is required
+smoothing: 0.8                      # translation smoothing; 0 disables
+max_interpolation_gap: 5            # longest hole that may be interpolated
+max_missing_joint_run: 8            # longer than this rejects the segment
+max_scale_step: 0.02                # frame-to-frame scale change ceiling
+shoulder_weight: 0.6                # shoulder width vs torso length in the scale

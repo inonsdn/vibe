@@ -49,6 +49,26 @@ data/
 │   ├── qc_report.json
 │   └── qc_report.txt
 │
+├── motion_sources/<motion_source_id>/
+│   ├── pose/                   frame_000000.json — pose data ONLY
+│   └── source_placeholder.bin  (tests) — no reference imagery is ever copied
+│
+├── compositions/<composition_id>/
+│   ├── normalized_poses/<motion_source_id>/   per-source canonical poses
+│   ├── bridge_poses/           generated bridge poses
+│   ├── composed_poses/         the final contiguous sequence (0..N-1)
+│   ├── preview.mp4             skeleton preview, drawn from poses
+│   ├── manifest.json
+│   └── qc_report.{json,txt}
+│
+├── heroes/<hero_id>/images/    Hero Character reference images
+│
+├── masters/<candidate_id>/
+│   ├── frames/                 candidate master frames
+│   ├── comfy_inputs/           per-chunk files staged for ComfyUI
+│   ├── manifest.json
+│   └── qc_report.{json,txt}
+│
 ├── exports/<job_id>.mp4        final 1080×1920 H.264 yuv420p
 ├── exports/<job_id>_preview.mp4
 ├── cache/ · logs/ · tmp/
@@ -65,6 +85,8 @@ data/
 | Depth | 16-bit PNG + `scale.json` | relative depth is sufficient |
 | Optical flow | `.npz` with `flow` | `(H, W, 2)` float32, frame N → N+1 |
 | Face landmarks | JSON | `{"schema", "bbox": [x,y,w,h], "landmarks": [[x,y],…]}` |
+| Pose frame | JSON | `{"schema_version", "frame_index", "timestamp_s", "space", "origin", "body": {joint: {x, y, confidence}}, "source_bbox"}` |
+| Skeleton preview | MP4 / H.264 | Drawn from poses; contains no source imagery |
 | Final video | MP4 / H.264 / yuv420p | 1080×1920, CRF 17, `+faststart`, AAC 192k |
 | Manifest | JSON | sorted keys, 2-space indent — diffable |
 | QC report | JSON + text | same data, two audiences |
@@ -81,7 +103,14 @@ SQLite in WAL mode, forward-only migrations in `src/app/db/migrations/`.
 | `render_jobs` | `id` | Job definition + mutable execution state |
 | `job_frames` | `(job_id, frame_index)` | Crash-safe per-frame completion — drives resume |
 | `job_manifests` | `job_id` | Manifest payload + reproducibility digest |
-| `audit_events` | autoincrement | Append-only: ingests, overrides, renders, deletions |
+| `motion_sources` | `(id, version)` | Motion references + pose provenance |
+| `skeleton_profiles` | `(id, version)` | Canonical profiles, cached from config |
+| `hero_characters` | `(id, version)` | Hero Character records |
+| `motion_compositions` | `(id, version)` | Segments, joins, bridges |
+| `master_candidates` | `id` | Candidate masters + acceptance state |
+| `master_chunks` | `(candidate_id, chunk_index)` | Crash-safe chunk completion — drives resume |
+| `master_manifests` | `candidate_id` | Master manifest + digest |
+| `audit_events` | autoincrement | Append-only: ingests, overrides, renders, acceptances, deletions |
 | `schema_migrations` | `version` | Applied migrations + their file hashes |
 
 Each record is stored as canonical JSON in a `payload` column plus a handful of
@@ -100,6 +129,10 @@ tpl_20260917T120000Z_9f3a1c     template
 grm_20260917T120500Z_1b7e44     garment
 cmp_20260917T120600Z_77aa01     compatibility report
 job_20260917T120700Z_0c5d92     render job
+mot_20260917T120800Z_44be10     motion source
+cmp_20260917T120900Z_1d90ab     motion composition (and compatibility report)
+hero_20260917T121000Z_bb2f31    Hero Character
+mst_20260917T121100Z_3e77c4     master candidate
 ```
 
 Readable, lexicographically sortable by creation time, and filesystem-safe.
@@ -169,3 +202,55 @@ the manifest itself proves which frames came from the cached intro.
 hash. It deliberately excludes wall-clock timestamps, machine details and the
 hashes of *compressed* outputs — encoders are not bit-identical across builds —
 while including every lossless frame checksum, which must match exactly.
+
+
+## Motion frame numbering
+
+Two numbering schemes exist, and they are deliberately kept apart until the
+composition assigns output indices:
+
+* **Source numbering** — a frame's index in its own reference clip. Pose files
+  under `motion_sources/<id>/pose/` and `compositions/<id>/normalized_poses/`
+  use this.
+* **Output numbering** — the composition's own `0..N-1`. Files under
+  `composed_poses/`, `bridge_poses/` and `masters/<id>/frames/` use this.
+
+Mixing them early is how off-by-one bugs get in, so normalization keeps each
+segment in its source numbering and only `assemble_sequence` maps to output
+indices. The layout it produces is documented in
+[`motion-composition.md`](motion-composition.md#the-frame-layout-at-a-join).
+
+## Composition manifest
+
+```jsonc
+{
+  "schema_version": "1",
+  "composition_id": "cmp_…",
+  "output_fps": 30.0,
+  "output_frame_count": 214,
+  "skeleton_profile": { "canonical_shoulder_width": 300.0, "…": "…" },
+  "segments": [
+    {
+      "motion_source": "mot_…@v1",
+      "effective_range": [0, 168],
+      "playback_speed": 1.0,
+      "canonical_transform": {
+        "base_scale": 3.33, "source_shoulder_width": 90.0,
+        "source_torso_length": 130.0, "interpolated_frames": [], "stats": {}
+      }
+    }
+  ],
+  "joins": [{ "prev_source_frame": 150, "next_source_frame": 20, "…": "…" }],
+  "bridge_settings": [{ "interpolation": "cubic_hermite", "frame_count": 12 }],
+  "input_hashes": {
+    "motion_source_video::mot_…@v1": "…",
+    "motion_source_pose::mot_…@v1": "…"
+  },
+  "contains_source_pixels": false,
+  "digest": "…"
+}
+```
+
+The digest excludes wall-clock timestamps (including the profile record's own
+`created_at`), so two identical compositions hash identically — otherwise the
+digest would be a label rather than a reproducibility claim.

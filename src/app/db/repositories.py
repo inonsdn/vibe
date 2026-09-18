@@ -23,6 +23,8 @@ from app.domain.enums import JobStatus
 from app.domain.garment import GarmentAsset
 from app.domain.human_template import HumanTemplate
 from app.domain.manifest import RenderManifest
+from app.domain.master import HeroCharacter, MasterCandidate
+from app.domain.motion import CanonicalSkeletonProfile, MotionComposition, MotionSource
 from app.domain.render_job import RenderJob
 
 logger = get_logger(__name__)
@@ -478,6 +480,445 @@ class JobRepository:
         return str(row["digest"]) if row else None
 
 
+__all__ = [
+    "AuditLog",
+    "CompatibilityRepository",
+    "CompositionRepository",
+    "GarmentRepository",
+    "HeroCharacterRepository",
+    "JobRepository",
+    "MasterCandidateRepository",
+    "MotionSourceRepository",
+    "Repositories",
+    "SkeletonProfileRepository",
+    "TemplateRepository",
+]
+
+
+# ---------------------------------------------------------------------------
+# Motion Composition
+# ---------------------------------------------------------------------------
+class MotionSourceRepository:
+    """Motion references. Stores pose provenance, never imagery."""
+
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def save(self, source: MotionSource, *, allow_update: bool = True) -> MotionSource:
+        existing = self.try_get(source.id, source.version)
+        if existing is not None and not allow_update:
+            raise ConflictError(
+                "Motion source version already exists",
+                motion_source_id=source.id,
+                version=source.version,
+            )
+        record = source.model_copy(update={"updated_at": utc_now()})
+        self._db.execute(
+            """
+            INSERT INTO motion_sources (
+                id, version, display_name, source_sha256, width, height, fps,
+                frame_count, range_start, range_end, pose_format, pose_origin,
+                status, created_at, updated_at, payload
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id, version) DO UPDATE SET
+                display_name = excluded.display_name,
+                source_sha256 = excluded.source_sha256,
+                range_start = excluded.range_start,
+                range_end = excluded.range_end,
+                pose_format = excluded.pose_format,
+                pose_origin = excluded.pose_origin,
+                status = excluded.status,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                record.id,
+                record.version,
+                record.display_name,
+                record.source_sha256,
+                record.video.width,
+                record.video.height,
+                record.video.fps,
+                record.video.frame_count,
+                record.selected_range.start,
+                record.selected_range.end,
+                record.pose_format,
+                record.pose_origin,
+                record.status.value,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat() if record.updated_at else None,
+                _dumps(record),
+            ),
+        )
+        return record
+
+    def try_get(self, source_id: str, version: int | None = None) -> MotionSource | None:
+        if version is None:
+            row = self._db.query_one(
+                "SELECT payload FROM motion_sources WHERE id = ? ORDER BY version DESC LIMIT 1",
+                (source_id,),
+            )
+        else:
+            row = self._db.query_one(
+                "SELECT payload FROM motion_sources WHERE id = ? AND version = ?",
+                (source_id, version),
+            )
+        return MotionSource.model_validate(_loads(row)) if row else None
+
+    def get(self, source_id: str, version: int | None = None) -> MotionSource:
+        source = self.try_get(source_id, version)
+        if source is None:
+            raise NotFoundError(
+                "Motion source not found", motion_source_id=source_id, version=version
+            )
+        return source
+
+    def list(self, *, limit: int = 100, offset: int = 0) -> builtins.list[MotionSource]:
+        rows = self._db.query_all(
+            "SELECT payload FROM motion_sources ORDER BY created_at DESC, id, version"
+            " LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [MotionSource.model_validate(_loads(row)) for row in rows]
+
+
+class SkeletonProfileRepository:
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def save(self, profile: CanonicalSkeletonProfile) -> CanonicalSkeletonProfile:
+        record = profile.model_copy(update={"updated_at": utc_now()})
+        self._db.execute(
+            "INSERT INTO skeleton_profiles (id, version, created_at, updated_at, payload)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(id, version) DO UPDATE SET"
+            "   updated_at = excluded.updated_at, payload = excluded.payload",
+            (
+                record.id,
+                record.version,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat() if record.updated_at else None,
+                _dumps(record),
+            ),
+        )
+        return record
+
+    def try_get(
+        self, profile_id: str, version: int | None = None
+    ) -> CanonicalSkeletonProfile | None:
+        if version is None:
+            row = self._db.query_one(
+                "SELECT payload FROM skeleton_profiles WHERE id = ? ORDER BY version DESC LIMIT 1",
+                (profile_id,),
+            )
+        else:
+            row = self._db.query_one(
+                "SELECT payload FROM skeleton_profiles WHERE id = ? AND version = ?",
+                (profile_id, version),
+            )
+        return CanonicalSkeletonProfile.model_validate(_loads(row)) if row else None
+
+    def get(self, profile_id: str, version: int | None = None) -> CanonicalSkeletonProfile:
+        profile = self.try_get(profile_id, version)
+        if profile is None:
+            raise NotFoundError(
+                "Skeleton profile not found", profile_id=profile_id, version=version
+            )
+        return profile
+
+
+class HeroCharacterRepository:
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def save(self, hero: HeroCharacter) -> HeroCharacter:
+        record = hero.model_copy(update={"updated_at": utc_now()})
+        self._db.execute(
+            "INSERT INTO hero_characters"
+            " (id, version, display_name, subject_kind, created_at, updated_at, payload)"
+            " VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(id, version) DO UPDATE SET"
+            "   display_name = excluded.display_name,"
+            "   subject_kind = excluded.subject_kind,"
+            "   updated_at = excluded.updated_at,"
+            "   payload = excluded.payload",
+            (
+                record.id,
+                record.version,
+                record.display_name,
+                record.subject_kind,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat() if record.updated_at else None,
+                _dumps(record),
+            ),
+        )
+        return record
+
+    def try_get(self, hero_id: str, version: int | None = None) -> HeroCharacter | None:
+        if version is None:
+            row = self._db.query_one(
+                "SELECT payload FROM hero_characters WHERE id = ? ORDER BY version DESC LIMIT 1",
+                (hero_id,),
+            )
+        else:
+            row = self._db.query_one(
+                "SELECT payload FROM hero_characters WHERE id = ? AND version = ?",
+                (hero_id, version),
+            )
+        return HeroCharacter.model_validate(_loads(row)) if row else None
+
+    def get(self, hero_id: str, version: int | None = None) -> HeroCharacter:
+        hero = self.try_get(hero_id, version)
+        if hero is None:
+            raise NotFoundError("Hero character not found", hero_id=hero_id, version=version)
+        return hero
+
+    def list(self, *, limit: int = 100) -> builtins.list[HeroCharacter]:
+        rows = self._db.query_all(
+            "SELECT payload FROM hero_characters ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+        return [HeroCharacter.model_validate(_loads(row)) for row in rows]
+
+
+class CompositionRepository:
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def save(self, composition: MotionComposition) -> MotionComposition:
+        record = composition.model_copy(update={"updated_at": utc_now()})
+        self._db.execute(
+            """
+            INSERT INTO motion_compositions (
+                id, version, display_name, segment_count, join_count, output_fps,
+                output_frame_count, profile_id, profile_version, status,
+                created_at, updated_at, payload
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id, version) DO UPDATE SET
+                display_name = excluded.display_name,
+                segment_count = excluded.segment_count,
+                join_count = excluded.join_count,
+                output_frame_count = excluded.output_frame_count,
+                status = excluded.status,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                record.id,
+                record.version,
+                record.display_name,
+                len(record.segments),
+                len(record.joins),
+                record.output_fps,
+                record.output_frame_count,
+                record.skeleton_profile_id,
+                record.skeleton_profile_version,
+                record.status.value,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat() if record.updated_at else None,
+                _dumps(record),
+            ),
+        )
+        return record
+
+    def try_get(self, composition_id: str, version: int | None = None) -> MotionComposition | None:
+        if version is None:
+            row = self._db.query_one(
+                "SELECT payload FROM motion_compositions WHERE id = ?"
+                " ORDER BY version DESC LIMIT 1",
+                (composition_id,),
+            )
+        else:
+            row = self._db.query_one(
+                "SELECT payload FROM motion_compositions WHERE id = ? AND version = ?",
+                (composition_id, version),
+            )
+        return MotionComposition.model_validate(_loads(row)) if row else None
+
+    def get(self, composition_id: str, version: int | None = None) -> MotionComposition:
+        composition = self.try_get(composition_id, version)
+        if composition is None:
+            raise NotFoundError(
+                "Motion composition not found", composition_id=composition_id, version=version
+            )
+        return composition
+
+    def list(self, *, limit: int = 100) -> builtins.list[MotionComposition]:
+        rows = self._db.query_all(
+            "SELECT payload FROM motion_compositions ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+        return [MotionComposition.model_validate(_loads(row)) for row in rows]
+
+
+class MasterCandidateRepository:
+    """Candidate masters, their chunk checkpoints and their manifests."""
+
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def save(self, candidate: MasterCandidate) -> MasterCandidate:
+        record = candidate.model_copy(update={"updated_at": utc_now()})
+        self._db.execute(
+            """
+            INSERT INTO master_candidates (
+                id, version, display_name, origin, composition_id, composition_version,
+                hero_id, hero_version, backend_name, backend_version, seed,
+                frame_count, status, accepted, promoted_template_id,
+                created_at, updated_at, payload
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                backend_version = excluded.backend_version,
+                frame_count = excluded.frame_count,
+                status = excluded.status,
+                accepted = excluded.accepted,
+                promoted_template_id = excluded.promoted_template_id,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                record.id,
+                record.version,
+                record.display_name,
+                record.origin.value,
+                record.composition_id,
+                record.composition_version,
+                record.hero_character_id,
+                record.hero_character_version,
+                record.backend_name,
+                record.backend_version,
+                record.seed,
+                record.frame_count,
+                record.status.value,
+                1 if record.is_accepted else 0,
+                record.promoted_template_id,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat() if record.updated_at else None,
+                _dumps(record),
+            ),
+        )
+        return record
+
+    def try_get(self, candidate_id: str) -> MasterCandidate | None:
+        row = self._db.query_one(
+            "SELECT payload FROM master_candidates WHERE id = ?", (candidate_id,)
+        )
+        return MasterCandidate.model_validate(_loads(row)) if row else None
+
+    def get(self, candidate_id: str) -> MasterCandidate:
+        candidate = self.try_get(candidate_id)
+        if candidate is None:
+            raise NotFoundError("Master candidate not found", candidate_id=candidate_id)
+        return candidate
+
+    def list(self, *, limit: int = 100) -> builtins.list[MasterCandidate]:
+        rows = self._db.query_all(
+            "SELECT payload FROM master_candidates ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+        return [MasterCandidate.model_validate(_loads(row)) for row in rows]
+
+    # -- chunk checkpoints -------------------------------------------------
+    def record_chunk(
+        self,
+        candidate_id: str,
+        chunk_index: int,
+        *,
+        start_frame: int,
+        end_frame: int,
+        status: str,
+        seed: int | None = None,
+        overlap_frames: int = 0,
+        duration_ms: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO master_chunks (
+                candidate_id, chunk_index, start_frame, end_frame, status, seed,
+                overlap_frames, duration_ms, attempts, error, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,1,?,?)
+            ON CONFLICT(candidate_id, chunk_index) DO UPDATE SET
+                start_frame = excluded.start_frame,
+                end_frame = excluded.end_frame,
+                status = excluded.status,
+                seed = excluded.seed,
+                overlap_frames = excluded.overlap_frames,
+                duration_ms = excluded.duration_ms,
+                attempts = master_chunks.attempts + 1,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            """,
+            (
+                candidate_id,
+                chunk_index,
+                start_frame,
+                end_frame,
+                status,
+                seed,
+                overlap_frames,
+                duration_ms,
+                error,
+                utc_now().isoformat(),
+            ),
+        )
+
+    def completed_chunks(self, candidate_id: str) -> builtins.list[dict[str, Any]]:
+        rows = self._db.query_all(
+            "SELECT chunk_index, start_frame, end_frame, seed, overlap_frames, duration_ms"
+            " FROM master_chunks WHERE candidate_id = ? AND status = 'completed'"
+            " ORDER BY chunk_index",
+            (candidate_id,),
+        )
+        return [
+            {
+                "chunk_index": int(row["chunk_index"]),
+                "start_frame": int(row["start_frame"]),
+                "end_frame": int(row["end_frame"]),
+                "seed": int(row["seed"]) if row["seed"] is not None else None,
+                "overlap_frames": int(row["overlap_frames"]),
+                "duration_ms": row["duration_ms"],
+            }
+            for row in rows
+        ]
+
+    def completed_chunks_indices(self, candidate_id: str) -> set[int]:
+        return {chunk["chunk_index"] for chunk in self.completed_chunks(candidate_id)}
+
+    def completed_frames(self, candidate_id: str) -> set[int]:
+        frames: set[int] = set()
+        for chunk in self.completed_chunks(candidate_id):
+            frames.update(range(chunk["start_frame"], chunk["end_frame"]))
+        return frames
+
+    def clear_chunks(self, candidate_id: str) -> int:
+        cursor = self._db.execute(
+            "DELETE FROM master_chunks WHERE candidate_id = ?", (candidate_id,)
+        )
+        return cursor.rowcount or 0
+
+    # -- manifests ---------------------------------------------------------
+    def save_manifest(self, candidate_id: str, digest: str, payload: dict[str, Any]) -> str:
+        self._db.execute(
+            "INSERT INTO master_manifests (candidate_id, digest, created_at, payload)"
+            " VALUES (?,?,?,?)"
+            " ON CONFLICT(candidate_id) DO UPDATE SET"
+            "   digest = excluded.digest, payload = excluded.payload",
+            (candidate_id, digest, utc_now().isoformat(), canonical_json(payload)),
+        )
+        return digest
+
+    def get_manifest(self, candidate_id: str) -> dict[str, Any] | None:
+        row = self._db.query_one(
+            "SELECT payload FROM master_manifests WHERE candidate_id = ?", (candidate_id,)
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def manifest_digest(self, candidate_id: str) -> str | None:
+        row = self._db.query_one(
+            "SELECT digest FROM master_manifests WHERE candidate_id = ?", (candidate_id,)
+        )
+        return str(row["digest"]) if row else None
+
+
 class Repositories:
     """Bundle handed to services so they take one dependency, not five."""
 
@@ -487,14 +928,9 @@ class Repositories:
         self.garments = GarmentRepository(database)
         self.compatibility = CompatibilityRepository(database)
         self.jobs = JobRepository(database)
+        self.motion_sources = MotionSourceRepository(database)
+        self.skeleton_profiles = SkeletonProfileRepository(database)
+        self.heroes = HeroCharacterRepository(database)
+        self.compositions = CompositionRepository(database)
+        self.masters = MasterCandidateRepository(database)
         self.audit = AuditLog(database)
-
-
-__all__ = [
-    "AuditLog",
-    "CompatibilityRepository",
-    "GarmentRepository",
-    "JobRepository",
-    "Repositories",
-    "TemplateRepository",
-]

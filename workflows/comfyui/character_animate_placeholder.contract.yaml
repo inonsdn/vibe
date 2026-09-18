@@ -1,0 +1,115 @@
+# Placeholder CHARACTER ANIMATION workflow contract.
+#
+# PURPOSE
+# -------
+# This proves the plumbing between the application and ComfyUI for the master
+# creation path, without requiring a single model weight. The workflow it binds
+# uses only core ComfyUI nodes:
+#
+#   LoadImage, ImageScale, ImageBlend, SaveImage
+#
+# It blends a pose control image over the Hero Character reference. The result
+# is NOT an animated character -- it is a wiring test, and its output should
+# never be judged as character animation.
+#
+# WHAT A REAL WORKFLOW MUST DO THAT THIS DOES NOT
+# -----------------------------------------------
+# 1. Actually animate the Hero Character into the supplied pose.
+# 2. Produce `batch_size` frames per submission, one per pose in the chunk, in
+#    frame order. This placeholder returns one image, so the ComfyUI animator
+#    backend will reject it with a clear count mismatch -- which is the correct
+#    behaviour and is exercised by the tests.
+# 3. Condition on `source_frame` (the last accepted frame of the previous chunk)
+#    so chunk boundaries are continuous rather than merely adjacent.
+# 4. Hold the background fixed across chunks.
+#
+# CONNECTING A REAL WORKFLOW
+# --------------------------
+# Same procedure as the garment workflow: build and test it by hand in ComfyUI,
+# title every node the application must write into, export the API format, copy
+# this file to <your_workflow_id>.contract.yaml, update the node titles, and set
+# `animator.workflow_id` in config/app.yaml.
+#
+# See docs/comfyui-integration.md.
+
+workflow_id: character_animate_placeholder
+workflow_file: character_animate_placeholder.json
+description: >-
+  Wiring-test workflow for the character animation path. Core ComfyUI nodes
+  only: blends a pose control image over a character reference. No checkpoints,
+  no custom nodes, no model weights, and NOT a character animator.
+
+requires_model_nodes: false
+
+inputs:
+  - logical_name: pose
+    node_title: POSE_CONTROL
+    input_name: image
+    kind: image_upload
+    required: true
+    description: >-
+      Skeleton control image rendered from the composed pose for this frame, in
+      the canonical output size.
+
+  - logical_name: garment_reference
+    node_title: HERO_CHARACTER_REFERENCE
+    input_name: image
+    kind: image_upload
+    required: true
+    description: >-
+      The Hero Character reference image. Reuses the `garment_reference` logical
+      name because the pipeline's upload plumbing is shared; a real workflow may
+      bind additional references.
+
+  - logical_name: source_frame
+    node_title: CONTEXT_PREVIOUS_FRAME
+    input_name: image
+    kind: image_upload
+    required: false
+    description: >-
+      The last accepted frame of the previous chunk. This is the continuity
+      signal: a real workflow must condition on it so chunk boundaries do not
+      show. Absent for the first chunk.
+
+  - logical_name: width
+    node_title: CANONICAL_OUTPUT_SIZE
+    input_name: width
+    kind: value
+    required: true
+    description: Canonical output width, fixed by the skeleton profile.
+
+  - logical_name: height
+    node_title: CANONICAL_OUTPUT_SIZE
+    input_name: height
+    kind: value
+    required: true
+    description: Canonical output height, fixed by the skeleton profile.
+
+  - logical_name: output_prefix
+    node_title: ANIMATED_FRAMES_OUT
+    input_name: filename_prefix
+    kind: value
+    required: false
+    description: Per-chunk output prefix so concurrent candidates cannot collide.
+
+output_node_titles:
+  - ANIMATED_FRAMES_OUT
+
+notes:
+  chunking: >-
+    The backend submits one prompt per chunk and expects exactly `batch_size`
+    frames back, in order. Bind `batch_size` in a real workflow and make the
+    sampler produce that many frames.
+  vram: >-
+    Core image nodes only; peak VRAM is negligible. A real character animation
+    workflow on an 8GB card should use a chunk of 8-24 frames, 12-24 context
+    frames, tiled VAE decode and low-VRAM mode. See
+    docs/troubleshooting-8gb-vram.md.
+  determinism: >-
+    This placeholder contains no sampler and is therefore deterministic. A real
+    workflow must be verified by animating the same chunk twice at the same seed
+    and comparing frame hashes before determinism is claimed anywhere.
+  not_an_animator: >-
+    Do not evaluate character animation quality with this workflow. It exists to
+    prove that pose control arrives, outputs come back, chunk resume works and
+    manifests are complete.

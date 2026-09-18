@@ -141,6 +141,78 @@ class ComfyUIConfig(StrictModel):
         return value.rstrip("/")
 
 
+class MotionConfig(StrictModel):
+    """Motion Composition defaults. See docs/architecture.md."""
+
+    skeleton_profile_file: str = "canonical_skeleton.v1.yaml"
+    pose_format: str = "coco_17"
+    #: Search windows for automatic anchor matching, in frames.
+    anchor_prev_window: int = 24
+    anchor_next_window: int = 24
+    anchor_max_candidates: int = 10
+    #: Candidates scoring above this are reported but not auto-accepted.
+    anchor_max_acceptable_score: float = 0.35
+    bridge_frames: int = 12
+    bridge_easing: str = "linear"
+    bridge_tangent_strength: float = 1.0
+    enforce_prototype_bridge_range: bool = True
+    preview_scale: float = 0.5
+    preview_crf: int = 26
+
+    @field_validator("bridge_frames")
+    @classmethod
+    def _bridge_length(cls, value: int) -> int:
+        if value < 2:
+            raise ValueError("a bridge needs at least 2 frames to carry both endpoints")
+        return value
+
+
+class AnimatorConfig(StrictModel):
+    """Character animation defaults, sized for an 8GB card."""
+
+    default: str = "mock"
+    #: Frames produced per chunk. Lower this first when VRAM is tight.
+    chunk_frames: int = 24
+    max_chunk_frames: int = 128
+    #: Accepted frames handed to the next chunk as continuity context.
+    overlap_frames: int = 16
+    workflow_id: str = "character_animate_placeholder"
+    max_retries: int = 2
+    low_vram_mode: bool = True
+    cpu_offload: bool = True
+
+    @model_validator(mode="after")
+    def _overlap_within_range(self) -> AnimatorConfig:
+        if not 12 <= self.overlap_frames <= 24:
+            raise ValueError(
+                "overlap_frames must be between 12 and 24: fewer loses continuity, "
+                "more wastes the chunk budget"
+            )
+        if self.overlap_frames >= self.chunk_frames:
+            raise ValueError("overlap_frames must be smaller than chunk_frames")
+        if self.chunk_frames > self.max_chunk_frames:
+            raise ValueError("chunk_frames must not exceed max_chunk_frames")
+        return self
+
+
+class MotionQCConfig(StrictModel):
+    """Thresholds for motion and master QC. Configurable, never hard-coded."""
+
+    max_shoulder_scale_drift: float = 0.02
+    max_body_center_jump_px: float = 8.0
+    max_torso_length_drift: float = 0.03
+    max_head_scale_drift: float = 0.05
+    max_head_position_jump_px: float = 12.0
+    max_limb_length_discontinuity: float = 0.08
+    max_velocity_discontinuity_px: float = 24.0
+    max_missing_joint_run: int = 8
+    #: Bridge endpoints must equal the anchors exactly; this is the tolerance
+    #: used when comparing, not a licence to differ.
+    bridge_endpoint_tolerance_px: float = 0.0
+    max_background_mean_abs_diff: float = 2.0
+    fps_tolerance: float = 0.01
+
+
 class QCConfig(StrictModel):
     """Thresholds. Intermediate (lossless) frames are checked strictly."""
 
@@ -200,6 +272,9 @@ class AppConfig(StrictModel):
     backend: BackendConfig = Field(default_factory=BackendConfig)
     comfyui: ComfyUIConfig = Field(default_factory=ComfyUIConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
+    motion: MotionConfig = Field(default_factory=MotionConfig)
+    animator: AnimatorConfig = Field(default_factory=AnimatorConfig)
+    motion_qc: MotionQCConfig = Field(default_factory=MotionQCConfig)
     compatibility: CompatibilityConfig = Field(default_factory=CompatibilityConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
@@ -332,11 +407,14 @@ __all__ = [
     "LOCAL_HOSTS",
     "REPO_ROOT",
     "APIConfig",
+    "AnimatorConfig",
     "AppConfig",
     "BackendConfig",
     "ComfyUIConfig",
     "CompatibilityConfig",
     "MaskConfig",
+    "MotionConfig",
+    "MotionQCConfig",
     "PathsConfig",
     "QCConfig",
     "RuntimeConfig",

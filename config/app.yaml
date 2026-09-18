@@ -90,6 +90,48 @@ qc:
   contact_sheet_period_frames: 24
   contact_sheet_transition_span: 6
 
+motion:
+  # Motion Composition. See docs/architecture.md and docs/operator-workflow.md.
+  skeleton_profile_file: canonical_skeleton.v1.yaml
+  pose_format: coco_17
+  anchor_prev_window: 24        # frames searched at the END of the previous segment
+  anchor_next_window: 24        # frames searched at the START of the next segment
+  anchor_max_candidates: 10
+  anchor_max_acceptable_score: 0.35
+  bridge_frames: 12             # prototype supports 10-12
+  bridge_easing: linear         # linear | smoothstep | ease_in_out
+                                # linear keeps endpoint velocities matching the
+                                # segments; the others stall slightly at the seam
+  bridge_tangent_strength: 1.0
+  enforce_prototype_bridge_range: true
+  preview_scale: 0.5
+  preview_crf: 26
+
+animator:
+  # Character animation, sized for an RTX 5060 8GB.
+  default: mock
+  chunk_frames: 24              # frames produced per chunk
+  max_chunk_frames: 128
+  overlap_frames: 16            # accepted frames handed to the next chunk (12-24)
+  workflow_id: character_animate_placeholder
+  max_retries: 2
+  low_vram_mode: true
+  cpu_offload: true
+
+motion_qc:
+  # Suggested starting thresholds. Tune these, do not edit code.
+  max_shoulder_scale_drift: 0.02        # 2%
+  max_body_center_jump_px: 8.0          # at a join, in output pixels
+  max_torso_length_drift: 0.03
+  max_head_scale_drift: 0.05
+  max_head_position_jump_px: 12.0
+  max_limb_length_discontinuity: 0.08
+  max_velocity_discontinuity_px: 24.0
+  max_missing_joint_run: 8
+  bridge_endpoint_tolerance_px: 0.0     # endpoints must match EXACTLY
+  max_background_mean_abs_diff: 2.0
+  fps_tolerance: 0.01
+
 compatibility:
   rules_file: compatibility_rules.v1.yaml
   block_on_needs_input: true
