@@ -288,7 +288,7 @@ def build_extract_frames_command(
     if fps is not None:
         filters.append(f"fps={fps}")
     if filters:
-        argv += ["-vf", ",".join(filters), "-vsync", "0"]
+        argv += ["-vf", ",".join(filters), "-fps_mode", "passthrough"]
     argv += [
         "-pix_fmt",
         "rgb24",
@@ -352,7 +352,7 @@ def build_encode_from_frames_command(
         pixel_format,
         "-r",
         _fps_arg(fps),
-        "-vsync",
+        "-fps_mode",
         "cfr",
     ]
     if audio_source is not None:

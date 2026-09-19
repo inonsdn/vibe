@@ -438,7 +438,7 @@ def write_synthetic_video(
         "ultrafast",
         "-pix_fmt",
         "yuv420p",
-        "-vsync",
+        "-fps_mode",
         "cfr",
         "-r",
         str(int(fps)),

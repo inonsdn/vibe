@@ -204,7 +204,7 @@ def convert_to_cfr(
         "-y",
         "-i",
         str(ffmpeg.assert_local_path(source, what="input")),
-        "-vsync",
+        "-fps_mode",
         "cfr",
         "-r",
         str(fps),

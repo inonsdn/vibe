@@ -328,7 +328,7 @@ def test_encode_command_pins_the_delivery_contract() -> None:
     assert "-c:v libx264" in joined
     assert "-pix_fmt yuv420p" in joined
     assert "scale=1080:1920" in joined
-    assert "-vsync cfr" in joined
+    assert "-fps_mode cfr" in joined
     assert "-movflags +faststart" in joined
 
 
