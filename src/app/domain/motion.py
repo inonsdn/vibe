@@ -144,6 +144,11 @@ class MotionSource(TimestampedModel):
     pose_sha256: str | None = None
     pose_origin: str = Field(default="imported", pattern=r"^(imported|extracted)$")
     pose_adapter: str | None = None
+    #: What the extraction actually did: execution provider, model hashes, ROI,
+    #: subject-tracking summary and temporal cleanup. Recorded because a run
+    #: that silently fell back to CPU, or tracked the wrong person, looks
+    #: identical in the pose files themselves.
+    pose_extraction: dict[str, Any] = Field(default_factory=dict)
 
     bbox_stats: BoundingBoxStats = Field(default_factory=BoundingBoxStats)
     quality: MotionQualityMetrics = Field(default_factory=MotionQualityMetrics)

@@ -73,11 +73,31 @@ data/
 │   ├── manifest.json
 │   └── qc_report.{json,txt}
 │
+├── diagnostics/motion/<motion_source_id>/
+│   ├── overlay.mp4             SOURCE PIXELS -- review only, never an input
+│   ├── skeleton.mp4            drawn from pose JSON alone
+│   ├── subject_boxes.json      candidates per frame + scored terms
+│   ├── confidence_summary.json per-joint confidence and coverage
+│   ├── missing_joints.json     missing runs, frames with no subject
+│   └── extraction.json         provider, model hashes, ROI, settings
+│
 ├── exports/<job_id>.mp4        final 1080×1920 H.264 yuv420p
 ├── exports/<job_id>_preview.mp4
 ├── cache/ · logs/ · tmp/
 └── db/app.db
 ```
+
+## Diagnostics are not inputs
+
+`diagnostics/` is a sibling of `motion_sources/` and `compositions/`, never a
+child. `overlay.mp4` contains pixels from a reference clip — that is the point
+of it, since tracking cannot be judged without seeing the skeleton on the real
+dancer — so it lives where nothing in the pipeline reads it.
+
+Two independent checks back that up rather than relying on convention:
+`extract_pose` refuses if an adapter writes any image or video file into a
+motion source's pose directory, and `app motion qc` fails if one appears in a
+composition's pose directories.
 
 ## Promoted synthetic masters
 

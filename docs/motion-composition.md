@@ -269,8 +269,12 @@ app motion ingest ./clip_03.mp4 --name "Motion A" --start-frame 0 --end-frame 16
 app motion ingest ./clip_02.mp4 --name "Motion B" --start-frame 12 --end-frame 210 \
     --motion-use-authorized --rights-holder "..." --license "..."
 
-# 2. Attach pose data (computed externally until an adapter is installed).
-app motion import-pose <motion_a> --from ./pose/clip_03
+# 2. Attach pose data. Either extract it locally with DWPose ONNX ...
+app motion extract-pose <motion_a> --adapter dwpose_onnx \
+    --detector-model /models/dwpose/yolox_l.onnx \
+    --pose-model /models/dwpose/dw-ll_ucoco_384.onnx \
+    --provider cuda --diagnostics
+# ... or import poses computed elsewhere.
 app motion import-pose <motion_b> --from ./pose/clip_02
 app motion inspect <motion_a>
 

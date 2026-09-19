@@ -42,6 +42,8 @@
 .env.*
 config/local.*
 *.local.yaml
+# ... but the documented template is committed, since it holds no real paths.
+!config/local.example.yaml
 
 # Python
 __pycache__/

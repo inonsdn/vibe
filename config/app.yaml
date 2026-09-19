@@ -107,6 +107,71 @@ motion:
   preview_scale: 0.5
   preview_crf: 26
 
+pose:
+  # DWPose ONNX pose extraction. See docs/dwpose-setup.md.
+  #
+  # NOTHING HERE IS DOWNLOADED. detector_model and pose_model are local file
+  # paths you supply after placing the ONNX files on this machine yourself.
+  # They are left empty on purpose so a fresh clone reports "missing_weights"
+  # instead of silently doing something. Put the real paths in
+  # config/local.yaml (gitignored) -- see config/local.example.yaml -- or set
+  # APP_POSE__DETECTOR_MODEL / APP_POSE__POSE_MODEL, or pass
+  # --detector-model / --pose-model.
+  adapter: none                 # none | dwpose_onnx | mock
+  detector_model: ""
+  pose_model: ""
+
+  provider: auto                # auto | cuda | cpu; auto prefers CUDA
+  require_requested_provider: true   # --provider cuda must not quietly use CPU
+  intra_op_threads: 0           # 0 = let onnxruntime decide
+
+  # Detector. Defaults match the YOLOX-style person detector DWPose pairs with.
+  detector_input_size: [640, 640]
+  detector_layout: yolox        # yolox | boxes (already-decoded output)
+  detector_strides: [8, 16, 32]
+  detector_person_class: 0      # COCO "person"
+  detection_score_threshold: 0.3
+  nms_iou_threshold: 0.45
+  max_detections: 20
+
+  # Keypoint model. 288x384 is the RTMPose-l whole-body input.
+  pose_input_size: [288, 384]
+  simcc_split_ratio: 2.0
+  bbox_padding: 1.25
+  keypoint_score_threshold: 0.3
+  emit_hands: true
+
+  # Region of interest. Cropping to the dancer removes the UI, the header
+  # avatars and a corner reference image from consideration entirely.
+  roi_mode: none                # none | pixels | normalized
+  roi: [0.0, 0.0, 0.0, 0.0]     # x, y, w, h
+
+  # Main-subject selection. Screen recordings contain profile pictures, UI
+  # icons and sometimes a cartoon in a corner; these terms are what keeps the
+  # dancer selected and stops the track jumping between them.
+  subject_area_weight: 0.35
+  subject_center_weight: 0.25
+  subject_iou_weight: 0.25
+  subject_continuity_weight: 0.15
+  subject_min_area_fraction: 0.02    # smaller than this is an avatar, not a dancer
+  subject_max_center_distance: 0.85  # fraction of the half-diagonal
+  subject_switch_margin: 0.15        # how much better a rival must be to take over
+  subject_max_coast_frames: 12       # keep looking for the same subject this long
+
+  # Temporal cleanup.
+  max_interpolation_gap: 3      # longer runs stay missing rather than invented
+  interpolation_confidence_scale: 0.6
+  smoothing_window: 2           # 0 disables smoothing
+  smoothing_strength: 0.6
+  fast_motion_px: 18.0          # above this per-frame travel, do not smooth --
+                                # a dancer's wrist is signal, not jitter
+
+  # Diagnostics. overlay.mp4 contains source pixels and is written OUTSIDE
+  # every composition input; see docs/motion-composition.md.
+  diagnostics_dirname: diagnostics
+  diagnostics_crf: 26
+  diagnostics_scale: 0.5
+
 animator:
   # Character animation, sized for an RTX 5060 8GB.
   default: mock

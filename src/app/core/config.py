@@ -167,6 +167,111 @@ class MotionConfig(StrictModel):
         return value
 
 
+class PoseConfig(StrictModel):
+    """Pose extraction settings, including the DWPose ONNX adapter.
+
+    **Nothing here names a download URL.** ``detector_model`` and ``pose_model``
+    are local filesystem paths the operator supplies; an empty path means the
+    adapter reports ``missing_weights`` and refuses to run rather than fetching
+    anything. Set them in ``config/local.yaml`` (gitignored), via
+    ``APP_POSE__DETECTOR_MODEL`` / ``APP_POSE__POSE_MODEL``, or per-invocation
+    with the CLI flags.
+    """
+
+    #: Which adapter `app motion extract-pose` uses by default.
+    adapter: str = Field(default="none", pattern=r"^(none|dwpose_onnx|mock)$")
+
+    # -- model files (local paths only) -----------------------------------
+    detector_model: str = ""
+    pose_model: str = ""
+
+    # -- execution --------------------------------------------------------
+    #: ``auto`` prefers CUDA and falls back to CPU, recording which was used.
+    provider: str = Field(default="auto", pattern=r"^(auto|cuda|cpu)$")
+    #: Fail instead of silently running on CPU when CUDA was asked for.
+    require_requested_provider: bool = True
+    intra_op_threads: int = Field(default=0, ge=0)
+
+    # -- detector ---------------------------------------------------------
+    #: (width, height) the detector session expects.
+    detector_input_size: tuple[int, int] = (640, 640)
+    #: ``yolox`` decodes grid-relative output; ``boxes`` takes decoded boxes.
+    detector_layout: str = Field(default="yolox", pattern=r"^(yolox|boxes)$")
+    detector_strides: tuple[int, ...] = (8, 16, 32)
+    #: COCO class index for "person". Other classes are discarded.
+    detector_person_class: int = Field(default=0, ge=0)
+    detection_score_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    nms_iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+    max_detections: int = Field(default=20, ge=1)
+
+    # -- pose model -------------------------------------------------------
+    #: (width, height) the pose session expects. RTMPose-l wholebody is 288x384.
+    pose_input_size: tuple[int, int] = (288, 384)
+    #: SimCC bins per pixel. Ignored for heatmap/keypoint outputs.
+    simcc_split_ratio: float = Field(default=2.0, gt=0.0)
+    #: Bounding-box padding before cropping, as DWPose does.
+    bbox_padding: float = Field(default=1.25, ge=1.0, le=2.0)
+    keypoint_score_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    #: Emit the 21-point hand sets a wholebody model produces.
+    emit_hands: bool = True
+
+    # -- region of interest ----------------------------------------------
+    roi_mode: str = Field(default="none", pattern=r"^(none|pixels|normalized)$")
+    #: ``[x, y, width, height]`` — pixels, or 0..1 fractions when normalized.
+    roi: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+
+    # -- subject selection -------------------------------------------------
+    # Screen recordings contain UI avatars, profile pictures and a reference
+    # image in a corner. These terms are what keeps the dancer selected.
+    subject_area_weight: float = Field(default=0.35, ge=0.0)
+    subject_center_weight: float = Field(default=0.25, ge=0.0)
+    subject_iou_weight: float = Field(default=0.25, ge=0.0)
+    subject_continuity_weight: float = Field(default=0.15, ge=0.0)
+    #: Hard gate: a box smaller than this fraction of the frame is not a dancer.
+    subject_min_area_fraction: float = Field(default=0.02, ge=0.0, le=1.0)
+    #: Hard gate: distance from frame centre, as a fraction of the half-diagonal.
+    subject_max_center_distance: float = Field(default=0.85, ge=0.0, le=2.0)
+    #: A challenger must beat the incumbent by this much to take over tracking.
+    subject_switch_margin: float = Field(default=0.15, ge=0.0)
+    #: Frames the tracker keeps looking for the same subject after a miss.
+    subject_max_coast_frames: int = Field(default=12, ge=0)
+
+    # -- temporal cleanup --------------------------------------------------
+    #: Gaps up to this many frames are interpolated; longer runs stay missing.
+    max_interpolation_gap: int = Field(default=3, ge=0)
+    #: Confidence assigned to an interpolated joint, relative to its neighbours.
+    interpolation_confidence_scale: float = Field(default=0.6, ge=0.0, le=1.0)
+    #: Moving-average half-window. 0 disables smoothing.
+    smoothing_window: int = Field(default=2, ge=0)
+    smoothing_strength: float = Field(default=0.6, ge=0.0, le=1.0)
+    #: Per-frame displacement above which smoothing is suppressed, so a fast
+    #: hand keeps its extent instead of being averaged into a stump.
+    fast_motion_px: float = Field(default=18.0, gt=0.0)
+
+    # -- diagnostics -------------------------------------------------------
+    #: Diagnostics live OUTSIDE every composition input, because the overlay
+    #: contains source pixels. See docs/motion-composition.md.
+    diagnostics_dirname: str = "diagnostics"
+    diagnostics_crf: int = Field(default=26, ge=0, le=51)
+    diagnostics_scale: float = Field(default=0.5, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _weights_are_meaningful(self) -> PoseConfig:
+        total = (
+            self.subject_area_weight
+            + self.subject_center_weight
+            + self.subject_iou_weight
+            + self.subject_continuity_weight
+        )
+        if total <= 0:
+            raise ValueError("at least one subject-selection weight must be positive")
+        if self.roi_mode == "normalized" and not all(0.0 <= v <= 1.0 for v in self.roi):
+            raise ValueError("a normalized roi must be four values in 0..1")
+        if self.roi_mode != "none" and (self.roi[2] <= 0 or self.roi[3] <= 0):
+            raise ValueError("roi width and height must be positive when roi_mode is set")
+        return self
+
+
 class AnimatorConfig(StrictModel):
     """Character animation defaults, sized for an 8GB card."""
 
@@ -273,6 +378,7 @@ class AppConfig(StrictModel):
     comfyui: ComfyUIConfig = Field(default_factory=ComfyUIConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
     motion: MotionConfig = Field(default_factory=MotionConfig)
+    pose: PoseConfig = Field(default_factory=PoseConfig)
     animator: AnimatorConfig = Field(default_factory=AnimatorConfig)
     motion_qc: MotionQCConfig = Field(default_factory=MotionQCConfig)
     compatibility: CompatibilityConfig = Field(default_factory=CompatibilityConfig)
@@ -416,6 +522,7 @@ __all__ = [
     "MotionConfig",
     "MotionQCConfig",
     "PathsConfig",
+    "PoseConfig",
     "QCConfig",
     "RuntimeConfig",
     "TransitionConfig",

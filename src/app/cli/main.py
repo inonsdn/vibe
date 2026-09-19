@@ -59,6 +59,7 @@ from app.pipeline.motion_compose import (
 )
 from app.pipeline.motion_ingest import (
     MotionIngestOptions,
+    extract_pose,
     import_pose,
     ingest_motion_source,
     validate_motion_source,
@@ -1124,6 +1125,137 @@ def motion_import_pose(
             lines.insert(1, f"range      {min(result.imported)}..{max(result.imported)}")
         for skip in result.skipped[:8]:
             lines.append(f"skipped    {skip}")
+        _emit(result.as_dict(), "\n".join(lines), force_json=json_output)
+
+
+@motion_app.command("extract-pose")
+def motion_extract_pose(
+    motion_id: Annotated[str, typer.Argument()],
+    adapter: Annotated[
+        str,
+        typer.Option("--adapter", help="dwpose_onnx | mock | registry (the configured default)."),
+    ] = "dwpose_onnx",
+    detector_model: Annotated[
+        Path | None,
+        typer.Option("--detector-model", help="Local path to the person-detector .onnx file."),
+    ] = None,
+    pose_model: Annotated[
+        Path | None,
+        typer.Option("--pose-model", help="Local path to the DWPose/RTMPose .onnx file."),
+    ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option("--provider", help="cuda | cpu | auto. auto prefers CUDA, falls back to CPU."),
+    ] = None,
+    allow_cpu_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-cpu-fallback/--require-provider",
+            help="Whether --provider cuda may quietly run on CPU. Off by default.",
+        ),
+    ] = False,
+    roi_mode: Annotated[
+        str | None, typer.Option("--roi-mode", help="none | pixels | normalized")
+    ] = None,
+    roi: Annotated[
+        str | None,
+        typer.Option("--roi", help="x,y,w,h -- pixels, or 0..1 fractions when normalized."),
+    ] = None,
+    diagnostics: Annotated[
+        bool,
+        typer.Option("--diagnostics", help="Write overlay/skeleton previews and reports."),
+    ] = False,
+    no_overlay: Annotated[
+        bool,
+        typer.Option("--no-overlay", help="Skip the overlay video, which contains source pixels."),
+    ] = False,
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    json_output: JsonFlag = False,
+) -> None:
+    """Extract pose from a motion reference with a real local model.
+
+    Model files are never downloaded. Point --detector-model and --pose-model at
+    ONNX files already on this machine, or set pose.detector_model /
+    pose.pose_model in config/local.yaml. See docs/dwpose-setup.md.
+    """
+    from app.adapters.factory import create_pose_adapter
+
+    overrides: dict[str, Any] = {}
+    if detector_model is not None:
+        overrides["detector_model"] = str(detector_model)
+    if pose_model is not None:
+        overrides["pose_model"] = str(pose_model)
+    if provider is not None:
+        overrides["provider"] = provider
+    if provider is not None or allow_cpu_fallback:
+        overrides["require_requested_provider"] = not allow_cpu_fallback
+    if roi_mode is not None:
+        overrides["roi_mode"] = roi_mode
+    if roi is not None:
+        parts = [piece.strip() for piece in roi.replace(" ", "").split(",")]
+        if len(parts) != 4:
+            typer.secho("--roi must be four comma-separated numbers: x,y,w,h", fg="red", err=True)
+            raise typer.Exit(code=2)
+        try:
+            overrides["roi"] = tuple(float(piece) for piece in parts)
+        except ValueError:
+            typer.secho("--roi values must be numbers", fg="red", err=True)
+            raise typer.Exit(code=2) from None
+        if roi_mode is None:
+            overrides["roi_mode"] = "pixels"
+
+    with _context() as context:
+        pose_adapter = _run(create_pose_adapter, adapter, context.config, **overrides)
+        capability = pose_adapter.capability()
+        if not capability.available:
+            typer.secho(f"pose adapter unavailable: {capability.reason}", fg="red", err=True)
+            raise typer.Exit(code=2)
+
+        result = _run(
+            extract_pose,
+            context,
+            motion_id,
+            version=version,
+            adapter=pose_adapter,
+            diagnostics=diagnostics,
+            diagnostics_overlay=not no_overlay,
+        )
+        extraction = result.extraction or {}
+        providers = extraction.get("provider") or {}
+        detector_provider = (providers.get("detector") or {}).get("active", "unknown")
+        pose_provider = (providers.get("pose") or {}).get("active", "unknown")
+        fell_back = any(
+            (providers.get(k) or {}).get("fell_back_to_cpu") for k in ("detector", "pose")
+        )
+
+        lines = [
+            f"adapter    {capability.name}",
+            f"provider   detector={detector_provider} pose={pose_provider}",
+            f"extracted  {len(result.imported)} pose frame(s)",
+            f"pose sha   {result.pose_sha256[:16]}...",
+            f"confidence mean={result.quality.mean_joint_confidence:.3f} "
+            f"min={result.quality.min_joint_confidence:.3f}",
+            f"shoulders  median {result.quality.median_shoulder_width_px}px",
+        ]
+        if result.imported:
+            lines.insert(3, f"range      {min(result.imported)}..{max(result.imported)}")
+        missing = extraction.get("frames_without_pose")
+        if missing:
+            lines.append(f"no subject {missing} frame(s) -- see the missing-joint report")
+        tracking = extraction.get("subject_tracking") or {}
+        if tracking:
+            lines.append(
+                f"tracking   {tracking.get('switches', 0)} subject switch(es), "
+                f"rejected {tracking.get('rejected', {})}"
+            )
+        if result.diagnostics_dir:
+            lines.append(f"diagnostics {result.diagnostics_dir}")
+        if fell_back:
+            lines.append("")
+            lines.append(
+                "WARNING: ran on CPU after asking for CUDA. This is ~20x slower; "
+                "install onnxruntime-gpu matching your CUDA runtime."
+            )
         _emit(result.as_dict(), "\n".join(lines), force_json=json_output)
 
 

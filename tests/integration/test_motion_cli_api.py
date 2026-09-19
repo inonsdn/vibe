@@ -48,6 +48,7 @@ def api_context(client: TestClient):
         ["motion", "--help"],
         ["motion", "ingest", "--help"],
         ["motion", "import-pose", "--help"],
+        ["motion", "extract-pose", "--help"],
         ["motion", "inspect", "--help"],
         ["motion", "normalize", "--help"],
         ["motion", "match-anchors", "--help"],

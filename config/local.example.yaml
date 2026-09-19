@@ -1,0 +1,34 @@
+# Copy to config/local.yaml and edit. config/local.yaml is gitignored, because
+# it holds paths that are specific to your machine.
+#
+# Layering: built-in defaults -> config/app.yaml -> config/local.yaml ->
+# APP_SECTION__FIELD environment variables -> CLI flags. Later wins.
+
+pose:
+  adapter: dwpose_onnx
+
+  # Local paths to ONNX files you downloaded yourself. Nothing in this
+  # application fetches them. See docs/dwpose-setup.md for which files and
+  # where to get them.
+  #
+  # Windows paths: forward slashes work fine in YAML and avoid escaping.
+  detector_model: "C:/models/dwpose/yolox_l.onnx"
+  pose_model: "C:/models/dwpose/dw-ll_ucoco_384.onnx"
+
+  # The RTX 5060 has CUDA; `auto` prefers it. With require_requested_provider
+  # on, asking for cuda explicitly fails loudly rather than crawling on CPU.
+  provider: auto
+
+  # dw-ll_ucoco_384 takes 288x384 input. If you use a different export, set the
+  # size it was built for -- a mismatch silently distorts every joint.
+  pose_input_size: [288, 384]
+
+  # Instagram screen recordings: crop away the chrome before detection.
+  # Fractions of the frame, x/y/w/h. Start with `none`, look at the overlay
+  # diagnostics, then tighten.
+  # roi_mode: normalized
+  # roi: [0.0, 0.12, 1.0, 0.76]
+
+# runtime:
+#   ffmpeg_binary: "C:/ffmpeg/bin/ffmpeg.exe"
+#   ffprobe_binary: "C:/ffmpeg/bin/ffprobe.exe"

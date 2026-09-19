@@ -114,7 +114,27 @@ python -m pytest
 Remove-Item Env:\ALL_PROXY
 ```
 
-## 6. ComfyUI (optional)
+## 6. Pose extraction (DWPose ONNX)
+
+Needed as soon as you want the system to produce pose data rather than import
+it. onnxruntime is deliberately **not** a dependency of this package, so you
+choose the GPU or CPU build:
+
+```powershell
+# RTX 5060: pick the build matching your installed CUDA runtime.
+pip install onnxruntime-gpu
+python -c "import onnxruntime; print(onnxruntime.get_available_providers())"
+```
+
+You want `CUDAExecutionProvider` in that list. Then place the two ONNX files
+(`yolox_l.onnx` and `dw-ll_ucoco_384.onnx`) somewhere stable such as
+`C:\models\dwpose\`, copy `config\local.example.yaml` to
+`config\local.yaml` and point it at them.
+
+Nothing is downloaded by the application. Full instructions, the smoke test and
+the tuning guide are in [`dwpose-setup.md`](dwpose-setup.md).
+
+## 7. ComfyUI (optional)
 
 Only needed when you have a real workflow to run. Install it yourself — this
 application never downloads anything.

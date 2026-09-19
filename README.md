@@ -203,6 +203,7 @@ Full specification: [`docs/mask-semantics.md`](docs/mask-semantics.md).
 | `app job backends` | Backend capabilities and health |
 | `app motion ingest` | Register a motion reference (no frames extracted) |
 | `app motion import-pose` | Attach externally computed pose JSON |
+| `app motion extract-pose` | **Extract pose with DWPose ONNX** (local models, no downloads) |
 | `app motion inspect` / `list` | Show and validate a motion reference |
 | `app motion normalize` | Dry-run the canonical transform for one source |
 | `app motion match-anchors` | Rank compatible join frames between two sources |
@@ -237,6 +238,7 @@ logs go to stderr, so piping stays clean).
 | [`docs/comfyui-integration.md`](docs/comfyui-integration.md) | Wiring a real workflow to logical inputs |
 | [`docs/offline-security.md`](docs/offline-security.md) | Offline model, path safety, consent, data handling |
 | [`docs/operator-workflow.md`](docs/operator-workflow.md) | The day-to-day production loop |
+| [`docs/dwpose-setup.md`](docs/dwpose-setup.md) | DWPose ONNX pose extraction: models, config, smoke test, tuning |
 | [`docs/model-selection-checklist.md`](docs/model-selection-checklist.md) | What to evaluate before choosing any model |
 | [`docs/troubleshooting-8gb-vram.md`](docs/troubleshooting-8gb-vram.md) | Making this work inside 8GB |
 | [`docs/implementation-status.md`](docs/implementation-status.md) | What is done, what is a stub, known limitations |

@@ -152,9 +152,17 @@ false negative there leaks an edit onto the performer's body. Precision matters
 less: a slightly oversized protected mask costs a little garment coverage, which
 is the cheap direction to be wrong in.
 
-### 3. Pose — now load-bearing, not just metadata
+### 3. Pose — INTEGRATED (DWPose ONNX)
 
-Candidates: DWPose, RTMPose, ViTPose, MediaPipe Pose, OpenPose.
+This one is no longer a choice to make: `DWPoseOnnxAdapter` is implemented. See
+[`dwpose-setup.md`](dwpose-setup.md) for the model files, configuration and the
+Windows smoke test — and for what the integration does *not* yet prove, which is
+that it has ever run against real weights.
+
+The criteria below still apply, as what to measure once it has.
+
+Alternatives, if DWPose disappoints on your footage: RTMPose (body-only, same
+SimCC decoder, already supported), ViTPose, MediaPipe Pose, OpenPose.
 
 Pose has **two roles** and they set different bars:
 
@@ -170,11 +178,15 @@ Pose has **two roles** and they set different bars:
     to interpolate and what to reject, so an over-confident detector is worse
     than an uncertain one.
 
-Output must be the internal pose JSON format
-(`app.motion.pose_format`). Until an adapter is installed, poses are computed
-externally and imported with `app motion import-pose`, which is how the system
-runs today. A deterministic mock exists for tests and is deliberately **not**
-registered, so no pipeline can pick it up by accident.
+Output must be the internal pose JSON format (`app.motion.pose_format`), which
+is what the DWPose adapter converts COCO-WholeBody indices into. Poses may still
+be computed externally and imported with `app motion import-pose`; the two paths
+produce identical downstream behaviour.
+
+A deterministic mock exists for tests and is deliberately **not** registered,
+and `create_pose_adapter` will not substitute it for a misconfigured real
+adapter — answering a missing weight file with synthetic poses is the specific
+failure this system refuses.
 
 ### 4. Depth
 

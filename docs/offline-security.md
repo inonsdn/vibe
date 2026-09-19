@@ -194,3 +194,25 @@ blocked garment.
 compromised ComfyUI install on the same machine; malicious content in a
 hand-authored workflow JSON. This is a single-operator local tool, and adding
 authentication theatre to a localhost service would be worse, not safer.
+
+
+## Local model weights (DWPose ONNX)
+
+The first real model integration changes nothing about the offline posture.
+
+* **No downloads, ever.** `pose.detector_model` and `pose.pose_model` are local
+  filesystem paths. An empty or missing path produces a refusal naming the path;
+  there is no hub client, no URL and no fetch-on-first-use anywhere in
+  `app/adapters/dwpose/`. A test greps the shipped source for URLs and fetchers
+  and fails if one appears.
+* **No network at inference.** onnxruntime runs a local file on the local
+  device. The test suite's network guard covers the whole extraction path.
+* **Weights are not committed.** `*.onnx` is gitignored alongside every other
+  checkpoint format, and `config/local.yaml` — which holds machine-specific
+  model paths — is gitignored too. `config/local.example.yaml` is committed and
+  contains only placeholder paths.
+* **Which weights ran is recorded.** Both ONNX files are hashed into the motion
+  source record and the composition manifest, so a manifest identifies the
+  weights rather than a filename that could later be overwritten.
+* **Diagnostics can be turned off.** `--no-overlay` suppresses the only artefact
+  that contains source pixels.

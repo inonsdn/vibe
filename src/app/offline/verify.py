@@ -76,6 +76,9 @@ class OfflineReport:
     paths: dict[str, dict[str, Any]] = field(default_factory=dict)
     gpu: dict[str, Any] = field(default_factory=dict)
     adapters: dict[str, Any] = field(default_factory=dict)
+    #: The pose adapter the configuration actually selects, which is not the
+    #: same thing as the process-wide registry entry.
+    configured_pose: dict[str, Any] = field(default_factory=dict)
     backends: dict[str, Any] = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -92,6 +95,7 @@ class OfflineReport:
             "paths": self.paths,
             "gpu": self.gpu,
             "adapters": self.adapters,
+            "configured_pose_adapter": self.configured_pose,
             "backends": self.backends,
             "problems": self.problems,
             "warnings": self.warnings,
@@ -103,6 +107,47 @@ def adapter_capability(kind: AdapterKind) -> dict[str, Any]:
     """One adapter's capability report, or a marker that none is registered."""
     adapter = adapter_registry.get(kind)
     return adapter.capability().as_dict() if adapter is not None else {"status": "unregistered"}
+
+
+def configured_pose_adapter(config: AppConfig) -> dict[str, Any]:
+    """The pose adapter ``config`` selects, and whether it could run now.
+
+    The registry answers "what does a bare installation do?" and will say
+    ``not_implemented`` forever, because a real adapter needs model files that
+    only the operator can supply. This answers the question an operator is
+    actually asking: are my weights where I said they were?
+    """
+    name = config.pose.adapter
+    info: dict[str, Any] = {
+        "adapter": name,
+        "detector_model_configured": bool(config.pose.detector_model),
+        "pose_model_configured": bool(config.pose.pose_model),
+        "provider_requested": config.pose.provider,
+        "downloads": "none - model files are supplied by the operator",
+    }
+    if name in {"none", ""}:
+        info["status"] = "not_configured"
+        info["reason"] = (
+            "No pose adapter is selected. Poses must be imported with "
+            "`app motion import-pose`, or set pose.adapter to dwpose_onnx and "
+            "point pose.detector_model / pose.pose_model at local ONNX files. "
+            "See docs/dwpose-setup.md."
+        )
+        return info
+
+    try:
+        from app.adapters.factory import create_pose_adapter
+
+        capability = create_pose_adapter(name, config).capability()
+    except Exception as exc:  # a misconfiguration must not break `doctor`
+        info["status"] = "error"
+        info["reason"] = str(exc)
+        return info
+
+    info["status"] = capability.status.value
+    info["reason"] = capability.reason
+    info["available"] = capability.available
+    return info
 
 
 def check_endpoints(config: AppConfig) -> list[EndpointReport]:
@@ -387,6 +432,7 @@ def verify_offline(
         paths=paths,
         gpu=check_gpu(),
         adapters=adapters,
+        configured_pose=configured_pose_adapter(config),
         backends=check_backends(config) if include_backends else {},
         problems=problems,
         warnings=warnings,
@@ -452,6 +498,18 @@ def render_text_report(report: OfflineReport) -> str:
     lines.append("Preprocessing adapters (no weights required or downloaded)")
     for kind, info in sorted(report.adapters.items()):
         lines.append(f"  {kind:<24} {info.get('status')}")
+
+    pose = report.configured_pose
+    if pose:
+        lines.append("")
+        lines.append("Configured pose adapter (model files are never downloaded)")
+        lines.append(f"  adapter                  {pose.get('adapter')}")
+        lines.append(f"  status                   {pose.get('status')}")
+        lines.append(f"  detector model set       {pose.get('detector_model_configured')}")
+        lines.append(f"  pose model set           {pose.get('pose_model_configured')}")
+        lines.append(f"  provider requested       {pose.get('provider_requested')}")
+        if pose.get("status") not in {"available"}:
+            lines.append(f"  -> {pose.get('reason', '')}")
 
     if report.problems:
         lines.append("")

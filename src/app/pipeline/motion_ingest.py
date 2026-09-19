@@ -53,6 +53,13 @@ from app.pipeline.template_ingest import build_video_spec
 
 logger = get_logger(__name__)
 
+#: File types that must never appear in a motion source's pose directory. A
+#: motion reference contributes geometry; imagery there would be a source-pixel
+#: leak into a composition input.
+NON_POSE_SUFFIXES: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".mp4", ".mov", ".mkv", ".webm"}
+)
+
 #: Used when no canonical profile can be loaded. Matches the shipped profile.
 DEFAULT_CONFIDENCE_THRESHOLD = 0.35
 
@@ -193,6 +200,10 @@ class PoseImportResult:
     quality: MotionQualityMetrics
     bbox_stats: BoundingBoxStats
     pose_sha256: str
+    #: Present for extraction, empty for import: provider, model hashes, ROI,
+    #: subject tracking and temporal cleanup.
+    extraction: dict[str, Any] = field(default_factory=dict)
+    diagnostics_dir: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -201,6 +212,8 @@ class PoseImportResult:
             "imported_range": ([min(self.imported), max(self.imported)] if self.imported else None),
             "skipped": self.skipped[:16],
             "pose_sha256": self.pose_sha256,
+            "extraction": self.extraction,
+            "diagnostics_dir": self.diagnostics_dir,
             "quality": self.quality.model_dump(mode="json"),
             "bbox_stats": self.bbox_stats.model_dump(mode="json"),
         }
@@ -383,13 +396,18 @@ def extract_pose(
     *,
     version: int | None = None,
     adapter: Any = None,
+    diagnostics: bool = False,
+    diagnostics_overlay: bool = True,
 ) -> PoseImportResult:
-    """Extract pose with a registered adapter.
+    """Extract pose with an adapter, keeping the clip's own frame numbering.
 
-    Today the registered pose adapter is a documented stub, so this raises with
-    an actionable message rather than inventing data. An adapter may be injected
-    (tests use the deterministic mock), which is the seam a real model will fill.
-    """
+    The adapter may be injected; otherwise the one registered for
+    :attr:`AdapterKind.POSE` is used. An unavailable adapter refuses with its
+    own reason rather than inventing data.
+
+    ``diagnostics`` writes review material — including an overlay video that
+    contains source pixels — into the data root's ``diagnostics/`` tree, which
+    is a sibling of every composition input and is never read by the pipeline."""
     record = context.repos.motion_sources.get(motion_source_id_, version)
     pose_adapter = adapter or adapter_registry.require(AdapterKind.POSE)
     capability = pose_adapter.capability()
@@ -423,13 +441,45 @@ def extract_pose(
             "Pose adapter does not implement estimate_sequence(video_path=…)",
             adapter=capability.name,
         )
-    estimate(
+    options: dict[str, Any] = {
+        "selected_range": [record.selected_range.start, record.selected_range.end],
+        "ffmpeg_binary": context.config.runtime.ffmpeg_binary,
+    }
+    diagnostics_target: Path | None = None
+    if diagnostics:
+        from app.adapters.dwpose.diagnostics import diagnostics_dir
+
+        diagnostics_target = diagnostics_dir(
+            context.data_root.path,
+            safe_identifier(record.id),
+            dirname=context.config.pose.diagnostics_dirname,
+        )
+        options["diagnostics_dir"] = str(diagnostics_target)
+        options["diagnostics_overlay"] = diagnostics_overlay
+
+    report = estimate(
         video_path=source_video,
         output_dir=destination,
         frame_indices=indices,
         fps=record.video.fps,
-        options={"selected_range": [record.selected_range.start, record.selected_range.end]},
+        options=options,
     )
+    extraction = dict(report) if isinstance(report, dict) else {}
+    # Structural guarantee, checked rather than asserted: the pose directory a
+    # composition reads must contain geometry and nothing else. A diagnostics
+    # overlay landing here would be a silent source-pixel leak.
+    strays = sorted(
+        path.name
+        for path in destination.rglob("*")
+        if path.is_file() and path.suffix.lower() in NON_POSE_SUFFIXES
+    )
+    if strays:
+        raise ValidationError(
+            "The pose adapter wrote non-pose files into the motion source's pose "
+            "directory. A motion reference contributes geometry, never imagery.",
+            motion_source_id=record.id,
+            offending_files=strays[:16],
+        )
 
     poses = load_pose_sequence(destination)
     written = sorted(p.frame_index for p in poses)
@@ -455,6 +505,7 @@ def extract_pose(
             "pose_sha256": digest,
             "quality": quality,
             "bbox_stats": bbox,
+            "pose_extraction": extraction,
         }
     )
     context.repos.motion_sources.save(updated)
@@ -466,6 +517,8 @@ def extract_pose(
             "adapter": capability.name,
             "count": len(poses),
             "synthetic": capability.notes.get("synthetic", False),
+            "provider": (extraction.get("provider") or {}),
+            "model_sha256": extraction.get("model_sha256", {}),
         },
     )
     return PoseImportResult(
@@ -475,6 +528,8 @@ def extract_pose(
         quality=quality,
         bbox_stats=bbox,
         pose_sha256=digest,
+        extraction=extraction,
+        diagnostics_dir=str(diagnostics_target) if diagnostics_target else None,
     )
 
 

@@ -65,6 +65,16 @@ not done. Nothing below claims a capability that has not been tested.
 | Reusing one motion source in a composition | Done | `tests/integration/test_motion_composition_reuse.py` |
 | Output-space join anchors + multi-join confirmation | Done | same |
 | Motion + master CLI and API | Done | `tests/integration/test_motion_cli_api.py` |
+| **DWPose ONNX pose extraction** | | |
+| Adapter, decoders, geometry, cleanup | Done (fake sessions) | `tests/unit/test_dwpose_adapter.py`, `test_dwpose_components.py` |
+| Provider resolution + honest reporting | Done (fake sessions) | same |
+| Deterministic main-subject selection | Done | `test_dwpose_adapter.py` |
+| ROI crop + coordinate restoration | Done | same |
+| Temporal interpolation / smoothing | Done | `test_dwpose_components.py` |
+| Wired through the motion pipeline | Done | `tests/integration/test_dwpose_pipeline.py` |
+| Diagnostics outside every input | Done | same |
+| CLI, config layering, adapter factory | Done | `tests/integration/test_dwpose_cli_config.py` |
+| **Run against real ONNX weights** | **NOT DONE** | no weights in this environment — see below |
 
 **All tests pass** with no GPU, no model weights, no ComfyUI and no network —
 and with proxy environment variables both set and unset. `ruff`, `black` and
@@ -81,17 +91,19 @@ data for real model output.
 | --- | --- | --- |
 | `sam2` | Video mask propagation from keyframes | SAM 2, SAM 2.1, Cutie, DEVA, XMem |
 | `human_parsing` | Derive the protected mask | SCHP, Graphonomy, Sapiens-seg |
-| `pose` | Control/QA metadata | RTMPose, ViTPose, DWPose, MediaPipe |
 | `densepose` | UV correspondence for texture mapping | DensePose, DensePose-CSE |
 | `depth` | Occlusion reasoning, shading cues | Depth Anything V2, Marigold, MiDaS |
 | `optical_flow` | Temporal consistency prior | RAFT, GMFlow, SEA-RAFT, OpenCV DIS |
 | `face_landmarks` | Face-region QC | MediaPipe FaceMesh, InsightFace |
 
-Pose has been promoted from "nice to have" to load-bearing: it is metadata for
-the garment pipeline but the *product* of Motion Composition. The registered
-adapter still reports `not_implemented` and raises; a deterministic
-`MockPoseAdapter` exists for tests and is deliberately **not** registered, so no
-pipeline can pick it up by accident. Poses are imported today.
+**Pose is no longer on that list.** `DWPoseOnnxAdapter` is a real
+implementation — see "DWPose has never been run against real weights" below for
+exactly what that does and does not prove. The process-wide *registry* still
+holds the `not_implemented` stub, because a fresh clone has no weights; a
+configured adapter is constructed explicitly by
+`app.adapters.factory.create_pose_adapter`. The deterministic `MockPoseAdapter`
+remains unregistered and reachable only by naming it, so a missing model file
+can never be answered with synthetic poses.
 
 See [`model-selection-checklist.md`](model-selection-checklist.md).
 
@@ -152,14 +164,35 @@ when that happens.
 
 ## Known limitations
 
-### Pose data is imported, not extracted
+### DWPose has never been run against real weights
 
-The dominant per-motion-reference cost. No pose model is installed, so pose JSON
-is produced externally and imported. A pose adapter is the highest-value
-integration for this phase, and its quality directly bounds what a synthetic
-master can be. The adapter seam itself is settled: `estimate_sequence` receives
-the video file and the exact source frame indices, and the poses it writes must
-carry those same indices — which is checked, not trusted.
+The single most important limitation in this document.
+
+**Proven by tests, with injected ONNX sessions:** the letterbox, the YOLOX
+decode and NMS, SimCC/heatmap/direct keypoint decoding, the crop expansion and
+its inverse, ROI restoration, the COCO-WholeBody→COCO-17 index mapping, subject
+selection and its gates, temporal interpolation and speed-aware smoothing,
+provider resolution and reporting, frame-index preservation, and the whole path
+through `app motion extract-pose` into a composition that passes motion QC.
+
+**Not proven, because no weights, no CUDA and no reference clips exist in the
+environment this was written in:** that `yolox_l.onnx` and
+`dw-ll_ucoco_384.onnx` load, that their real output shapes match the decoders,
+that the configured input sizes are right, that CUDA binds, or that the tracker
+picks the dancer out of an actual Instagram screen recording. The first real run
+is the smoke test in [`dwpose-setup.md`](dwpose-setup.md), and it is expected to
+need at least the input sizes checked.
+
+A decoder that guesses is worse than one that refuses, so unrecognised output
+shapes, keypoint counts and stride mismatches all raise with the numbers in the
+message rather than producing plausible-looking wrong joints.
+
+### Pose quality bounds everything downstream
+
+Extraction quality directly limits what a synthetic master can be. Occlusion,
+motion blur and the dancer leaving frame are the model's failure modes, not
+this integration's; the diagnostics exist to make them visible before GPU time
+is spent. `app motion qc` still rejects long missing-joint runs.
 
 ### The animation placeholder needs a custom node
 
@@ -281,8 +314,10 @@ not been exercised on Windows hardware here.
 
 **Motion Composition**
 
-4. Integrate a pose adapter (DWPose/RTMPose class), judged on wrist accuracy,
-   shoulder-width stability and confidence calibration.
+4. **Run DWPose against real weights on the RTX 5060** and judge it on wrist
+   accuracy, shoulder-width stability and confidence calibration. The
+   integration is done; the verification is not. See
+   [`dwpose-setup.md`](dwpose-setup.md).
 5. Integrate a character animator and verify: chunk-boundary invisibility,
    identity stability over 200+ frames, background stability, and determinism by
    hash comparison. Only then may `produces_photoreal` become `True`.
