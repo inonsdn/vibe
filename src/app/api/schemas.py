@@ -227,6 +227,21 @@ class MasterRejectRequest(ApiModel):
     reason: str = Field(min_length=10)
 
 
+class MasterPromoteRequest(ApiModel):
+    """Promotion inputs. ``transition_anchor`` omitted means "use the
+    composition's recommendation", which needs confirmation when there is more
+    than one join."""
+
+    transition_anchor: int | None = Field(default=None, ge=0)
+    template_id: str | None = None
+    display_name: str | None = None
+    template_clothing_class: TemplateClothingClass = TemplateClothingClass.FITTED_SHORT
+    promoted_by: str = Field(default="operator", min_length=1)
+    confirm_multiple_joins: bool = False
+    encode_archive_video: bool = True
+    notes: str | None = None
+
+
 __all__ = [
     "ApiModel",
     "CompatibilityCheckRequest",
@@ -243,6 +258,7 @@ __all__ = [
     "MasterAcceptRequest",
     "MasterAnimateRequest",
     "MasterCreateRequest",
+    "MasterPromoteRequest",
     "MasterRejectRequest",
     "MotionComposeRequest",
     "MotionIngestRequest",

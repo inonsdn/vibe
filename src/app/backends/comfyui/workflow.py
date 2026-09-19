@@ -19,6 +19,7 @@ from typing import Any
 
 import yaml
 
+from app.backends.comfyui.sequence import KNOWN_KINDS, SEQUENCE_KINDS
 from app.core.errors import ConfigError, ValidationError
 from app.core.hashing import sha256_file, sha256_json
 from app.core.logging import get_logger
@@ -28,6 +29,7 @@ logger = get_logger(__name__)
 #: Logical inputs the pipeline knows how to supply. A contract may use a subset.
 KNOWN_LOGICAL_INPUTS: frozenset[str] = frozenset(
     {
+        # -- single-frame (garment replacement) --
         "source_frame",
         "source_frame_window",
         "garment_reference",
@@ -38,6 +40,18 @@ KNOWN_LOGICAL_INPUTS: frozenset[str] = frozenset(
         "protected_mask",
         "pose",
         "depth",
+        # -- sequence (character animation) --
+        # A multi-frame animation workflow needs the WHOLE chunk, not one still.
+        "pose_sequence",
+        "context_sequence",
+        "context_frame",
+        "hero_reference",
+        "hero_reference_back",
+        "hero_reference_side",
+        "start_frame",
+        "fps",
+        "frame_count",
+        # -- shared scalars --
         "seed",
         "steps",
         "denoise",
@@ -52,6 +66,15 @@ KNOWN_LOGICAL_INPUTS: frozenset[str] = frozenset(
     }
 )
 
+#: Logical inputs that carry a sequence rather than a single value/still.
+SEQUENCE_INPUTS: frozenset[str] = frozenset({"pose_sequence", "context_sequence"})
+
+#: Logical inputs a character-animation contract must declare to be usable.
+#: ``batch_size`` is on this list because a contract that does not bind it lets
+#: the workflow decide how many frames to produce, and the backend then has no
+#: way to make the output count follow the chunk.
+ANIMATION_REQUIRED_INPUTS: frozenset[str] = frozenset({"pose_sequence", "batch_size"})
+
 
 @dataclass(frozen=True)
 class WorkflowBinding:
@@ -61,9 +84,15 @@ class WorkflowBinding:
     input_name: str
     node_title: str | None = None
     node_id: str | None = None
-    kind: str = "value"  # value | image_path | image_upload
+    #: One of :data:`~app.backends.comfyui.sequence.KNOWN_KINDS`. The
+    #: ``sequence_*`` kinds carry every frame of a chunk, in order.
+    kind: str = "value"
     required: bool = True
     description: str = ""
+
+    @property
+    def is_sequence(self) -> bool:
+        return self.kind in SEQUENCE_KINDS
 
     def locate(self, graph: dict[str, Any]) -> str:
         """Resolve this binding to a concrete node id in ``graph``."""
@@ -121,6 +150,19 @@ class WorkflowContract:
 
     def required_inputs(self) -> tuple[str, ...]:
         return tuple(b.logical_name for b in self.bindings if b.required)
+
+    def declares(self, logical_name: str) -> bool:
+        return any(b.logical_name == logical_name for b in self.bindings)
+
+    def declared_inputs(self) -> frozenset[str]:
+        return frozenset(b.logical_name for b in self.bindings)
+
+    def sequence_bindings(self) -> tuple[WorkflowBinding, ...]:
+        return tuple(b for b in self.bindings if b.is_sequence)
+
+    def missing_animation_inputs(self) -> tuple[str, ...]:
+        """Animation inputs this contract fails to declare, if any."""
+        return tuple(sorted(ANIMATION_REQUIRED_INPUTS - self.declared_inputs()))
 
     def contract_sha256(self) -> str:
         if self.contract_path is not None and self.contract_path.is_file():
@@ -250,13 +292,41 @@ def load_contract(path: str | Path) -> WorkflowContract:
                 logical_name=logical,
                 path=str(target),
             )
+        kind = str(entry.get("kind", "value"))
+        if kind not in KNOWN_KINDS:
+            raise ConfigError(
+                "Contract input declares an unknown kind",
+                logical_name=logical,
+                kind=kind,
+                known=sorted(KNOWN_KINDS),
+                path=str(target),
+            )
+        # A sequence logical input bound as a single still is precisely the bug
+        # this validation exists to catch: the workflow would animate one pose
+        # for a whole chunk and nothing downstream would notice.
+        if logical in SEQUENCE_INPUTS and kind not in SEQUENCE_KINDS:
+            raise ConfigError(
+                "A sequence input must be bound with a sequence kind",
+                logical_name=logical,
+                kind=kind,
+                expected=sorted(SEQUENCE_KINDS),
+                path=str(target),
+            )
+        if kind in SEQUENCE_KINDS and logical not in SEQUENCE_INPUTS:
+            raise ConfigError(
+                "A sequence kind may only be used for a sequence input",
+                logical_name=logical,
+                kind=kind,
+                sequence_inputs=sorted(SEQUENCE_INPUTS),
+                path=str(target),
+            )
         bindings.append(
             WorkflowBinding(
                 logical_name=logical,
                 input_name=str(entry["input_name"]),
                 node_title=entry.get("node_title"),
                 node_id=str(entry["node_id"]) if entry.get("node_id") is not None else None,
-                kind=str(entry.get("kind", "value")),
+                kind=kind,
                 required=bool(entry.get("required", True)),
                 description=str(entry.get("description", "")),
             )
@@ -290,7 +360,11 @@ def find_contract(workflows_dir: str | Path, workflow_id: str) -> Path:
 
 
 __all__ = [
+    "ANIMATION_REQUIRED_INPUTS",
+    "KNOWN_KINDS",
     "KNOWN_LOGICAL_INPUTS",
+    "SEQUENCE_INPUTS",
+    "SEQUENCE_KINDS",
     "WorkflowBinding",
     "WorkflowContract",
     "find_contract",

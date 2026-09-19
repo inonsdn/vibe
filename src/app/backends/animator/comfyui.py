@@ -12,6 +12,13 @@ inheritance, bounded waits, and node binding by *title* rather than node id.
 ``produces_photoreal`` is reported as ``False`` and ``deterministic`` as
 ``False`` until a specific workflow has been integrated and measured. Claiming
 either before that would be a lie the manifest would then record.
+
+**Sequences, not stills.** A chunk is 8-24 output frames, so every pose in the
+chunk is staged as one ordered asset (a numbered PNG run, or a visually lossless
+video where the contract asks for one) and the whole gathered context tail is
+staged the same way. The backend refuses to submit a contract that cannot carry
+them, and the frame counts it reports come from the staged assets rather than
+from the request -- so the manifest records what the workflow actually received.
 """
 
 from __future__ import annotations
@@ -28,10 +35,18 @@ from app.backends.animator.base import (
     AnimatorCapabilities,
     AnimatorContext,
     CharacterAnimatorBackend,
+    ContextMode,
 )
 from app.backends.base import HealthStatus
 from app.backends.comfyui.client import ComfyUIClient
+from app.backends.comfyui.sequence import (
+    SEQUENCE_KIND_VIDEO,
+    StagedSequence,
+    encode_sequence_video,
+    stage_frame_sequence,
+)
 from app.backends.comfyui.workflow import (
+    WorkflowBinding,
     WorkflowContract,
     find_contract,
     load_contract,
@@ -49,6 +64,9 @@ logger = get_logger(__name__)
 
 BACKEND_NAME = "comfyui"
 BACKEND_VERSION = "0.1.0"
+
+#: Root of the per-candidate staging tree inside ComfyUI's ``input/`` folder.
+UPLOAD_SUBFOLDER = "garment_replacer_motion"
 
 
 class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
@@ -93,7 +111,10 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
             requires_gpu=True,
             requires_model_weights=True,
             deterministic=False,
-            supports_context_frames=True,
+            # Declared, and then actually honoured: `_stage_chunk_inputs` stages
+            # every context frame the pipeline hands over, in order, and refuses
+            # to submit a contract that has nowhere to put them.
+            context_mode=ContextMode.SEQUENCE,
             max_chunk_frames=self._config.animator.max_chunk_frames,
             recommended_chunk_frames=self._config.animator.chunk_frames,
             recommended_overlap_frames=self._config.animator.overlap_frames,
@@ -183,7 +204,14 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
             raise BackendError("prepare() must be called before animate_chunk()")
 
         started = time.perf_counter()
+        # Structural checks first: a malformed chunk must never reach ComfyUI,
+        # because a workflow that silently animates the wrong frames produces
+        # output nothing downstream can detect as wrong.
+        request.validate()
+        self._assert_contract_supports(request)
+
         staged = self._stage_chunk_inputs(context, request)
+        self._assert_sequences_match(request, staged)
         values = self._build_values(context, request, staged)
         graph = self._contract.apply(self._graph, values)
 
@@ -208,6 +236,19 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
                 returned=len(images),
                 hint="The workflow's batch size must follow the supplied frame count.",
             )
+        identities = [
+            (str(image.get("subfolder", "")), str(image.get("filename", "")))
+            for image in images
+            if isinstance(image, dict)
+        ]
+        if len(identities) == len(images) and len(set(identities)) != len(identities):
+            duplicates = sorted({i for i in identities if identities.count(i) > 1})
+            raise BackendError(
+                "ComfyUI returned the same output image more than once; the "
+                "chunk would contain duplicated frames",
+                chunk_index=request.chunk_index,
+                duplicates=[f"{sub}/{name}" if sub else name for sub, name in duplicates][:8],
+            )
 
         frames: dict[int, np.ndarray] = {}
         for offset, image in enumerate(images):
@@ -225,6 +266,8 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
                 )
             frames[frame_index] = decoded
 
+        pose_sequence = staged.get("pose_sequence")
+        context_sequence = staged.get("context_sequence")
         return AnimationChunkResult(
             chunk_index=request.chunk_index,
             frames=frames,
@@ -232,7 +275,13 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
             backend_metadata={
                 "prompt_id": handle.prompt_id,
                 "elapsed_s": round(outcome.elapsed_s, 3),
-                "context_frames_used": len(request.context_frames),
+                "context_mode": ContextMode.SEQUENCE.value,
+                # The number of frames actually handed to the workflow, taken
+                # from the staged asset rather than from the request, so the
+                # manifest cannot claim context the workflow never received.
+                "context_frames_used": context_sequence.count if context_sequence else 0,
+                "pose_frames_submitted": pose_sequence.count if pose_sequence else 0,
+                "pose_sequence_kind": pose_sequence.kind if pose_sequence else None,
             },
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
@@ -263,11 +312,85 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
     def close(self) -> None:
         self._client.close()
 
-    # -- helpers ----------------------------------------------------------
+    # -- validation -------------------------------------------------------
+    def _assert_contract_supports(self, request: AnimationChunkRequest) -> None:
+        """Refuse to submit a contract that cannot express this chunk."""
+        assert self._contract is not None
+        missing = self._contract.missing_animation_inputs()
+        if missing:
+            raise BackendError(
+                "The character animation contract does not declare the inputs a "
+                "multi-frame chunk needs. Without them the workflow receives one "
+                "pose and decides its own frame count.",
+                workflow_id=self._contract.workflow_id,
+                missing_inputs=list(missing),
+                declared=sorted(self._contract.declared_inputs()),
+                hint=(
+                    "Bind pose_sequence (kind: sequence_dir or sequence_video) "
+                    "and batch_size in the contract YAML."
+                ),
+            )
+        if not request.context_frames:
+            return
+        mode = self.capabilities().context_mode
+        if mode is ContextMode.SEQUENCE and not self._contract.declares("context_sequence"):
+            raise BackendError(
+                "This backend consumes a context sequence, but the contract has "
+                "nowhere to put one. Refusing to submit and silently drop the "
+                "continuity signal.",
+                workflow_id=self._contract.workflow_id,
+                context_frames=len(request.context_frames),
+                hint="Bind context_sequence (kind: sequence_dir or sequence_video).",
+            )
+        if mode is ContextMode.LAST_FRAME and not (
+            self._contract.declares("context_frame") or self._contract.declares("source_frame")
+        ):
+            raise BackendError(
+                "This backend consumes one context frame, but the contract "
+                "declares neither context_frame nor source_frame.",
+                workflow_id=self._contract.workflow_id,
+                hint="Bind context_frame in the contract YAML.",
+            )
+
+    @staticmethod
+    def _assert_sequences_match(
+        request: AnimationChunkRequest, staged: dict[str, StagedSequence]
+    ) -> None:
+        """Every requested frame must be represented, once, in the right place."""
+        poses = staged.get("pose_sequence")
+        if poses is None or list(poses.frame_indices) != request.frame_indices:
+            raise BackendError(
+                "The staged pose sequence does not match the chunk frame by frame",
+                chunk_index=request.chunk_index,
+                expected_count=request.frame_count,
+                staged_count=poses.count if poses else 0,
+                expected_first=request.start_frame,
+                expected_last=request.end_frame - 1,
+                staged_first=poses.first_index if poses else None,
+                staged_last=poses.last_index if poses else None,
+            )
+        contexts = staged.get("context_sequence")
+        staged_context = list(contexts.frame_indices) if contexts else []
+        if staged_context != request.context_frame_indices:
+            raise BackendError(
+                "The staged context sequence does not match the context frames "
+                "the pipeline gathered",
+                chunk_index=request.chunk_index,
+                expected=request.context_frame_indices,
+                staged=staged_context,
+            )
+
+    # -- staging ----------------------------------------------------------
     def _stage_chunk_inputs(
         self, context: AnimatorContext, request: AnimationChunkRequest
-    ) -> dict[str, str]:
-        """Write pose control images, pose JSON and context frames for a chunk."""
+    ) -> dict[str, StagedSequence]:
+        """Write the chunk's pose and context sequences as deterministic assets.
+
+        One asset per logical sequence input, containing **every** frame of the
+        chunk in order. The pose JSON is written alongside as an audit trail; it
+        is not what the workflow consumes.
+        """
+        assert self._contract is not None
         staging = context.candidate_dir / "comfy_inputs" / f"chunk_{request.chunk_index:04d}"
         staging.mkdir(parents=True, exist_ok=True)
         preview = PreviewSettings(
@@ -277,68 +400,168 @@ class ComfyUIAnimatorBackend(CharacterAnimatorBackend):
             draw_labels=False,
         )
 
-        first_pose: Path | None = None
+        poses_json = staging / "poses"
+        poses_json.mkdir(parents=True, exist_ok=True)
         for pose in request.poses:
-            control = staging / f"pose_{frame_filename(pose.frame_index)}"
-            write_frame(control, render_preview_frame(pose, preview))
-            save_pose_frame(staging / f"pose_{pose.frame_index:06d}.json", pose)
-            if first_pose is None:
-                first_pose = control
+            save_pose_frame(poses_json / f"pose_{pose.frame_index:06d}.json", pose)
 
-        context_path: Path | None = None
-        if request.context_frames:
-            context_path = staging / "context_last.png"
-            write_frame(context_path, request.context_frames[-1])
-
-        staged: dict[str, str] = {}
-        if first_pose is not None:
-            staged["pose"] = (
-                self._client.upload_image(first_pose, subfolder="garment_replacer_motion")
-                if self._comfy_config.upload_inputs
-                else str(first_pose)
-            )
-        if context_path is not None:
-            staged["source_frame"] = (
-                self._client.upload_image(context_path, subfolder="garment_replacer_motion")
-                if self._comfy_config.upload_inputs
-                else str(context_path)
+        staged: dict[str, StagedSequence] = {}
+        staged["pose_sequence"] = self._stage_one(
+            context,
+            request,
+            logical_name="pose_sequence",
+            directory=staging / "pose_sequence",
+            prefix="pose",
+            frames=[
+                (pose.frame_index, render_preview_frame(pose, preview)) for pose in request.poses
+            ],
+        )
+        if request.context_frames and self._contract.declares("context_sequence"):
+            staged["context_sequence"] = self._stage_one(
+                context,
+                request,
+                logical_name="context_sequence",
+                directory=staging / "context_sequence",
+                prefix="context",
+                frames=list(
+                    zip(request.context_frame_indices, request.context_frames, strict=True)
+                ),
             )
         return staged
 
+    def _stage_one(
+        self,
+        context: AnimatorContext,
+        request: AnimationChunkRequest,
+        *,
+        logical_name: str,
+        directory: Path,
+        prefix: str,
+        frames: list[tuple[int, np.ndarray]],
+    ) -> StagedSequence:
+        assert self._contract is not None
+        sequence = stage_frame_sequence(directory, frames, logical_name=logical_name, prefix=prefix)
+        binding = self._contract.binding(logical_name)
+        if binding is not None and binding.kind == SEQUENCE_KIND_VIDEO:
+            sequence = encode_sequence_video(
+                sequence,
+                directory.parent / f"{prefix}_sequence.mp4",
+                fps=context.candidate.fps,
+                ffmpeg_binary=self._config.runtime.ffmpeg_binary,
+            )
+        return sequence
+
+    def _upload_subfolder(self, context: AnimatorContext, chunk_index: int, leaf: str) -> str:
+        return f"{UPLOAD_SUBFOLDER}/{context.candidate.id}/chunk_{chunk_index:04d}/{leaf}"
+
+    def _sequence_value(
+        self,
+        context: AnimatorContext,
+        request: AnimationChunkRequest,
+        sequence: StagedSequence,
+        binding: WorkflowBinding,
+    ) -> str:
+        """Stage a sequence into ComfyUI and return the value its node reads.
+
+        A directory binding gets an input-relative folder name; every frame in it
+        is uploaded first, in order. A video binding gets the uploaded file name.
+        With ``upload_inputs`` off, both get the local path, which only works
+        when ComfyUI runs on this machine -- which it must.
+        """
+        subfolder = self._upload_subfolder(context, request.chunk_index, sequence.logical_name)
+        if binding.kind == SEQUENCE_KIND_VIDEO:
+            video = sequence.video_path
+            if video is None:  # pragma: no cover - guarded by _stage_one
+                raise BackendError(
+                    "A sequence_video binding has no encoded video",
+                    logical_name=sequence.logical_name,
+                )
+            if not self._comfy_config.upload_inputs:
+                return str(video)
+            return self._client.upload_file(video, subfolder=subfolder)
+        if not self._comfy_config.upload_inputs:
+            return str(sequence.directory)
+        for path in sequence.files:
+            self._client.upload_file(path, subfolder=subfolder)
+        return subfolder
+
+    # -- value mapping ----------------------------------------------------
     def _build_values(
         self,
         context: AnimatorContext,
         request: AnimationChunkRequest,
-        staged: dict[str, str],
+        staged: dict[str, StagedSequence],
     ) -> dict[str, Any]:
         """Map candidate data onto the contract's declared logical inputs."""
         assert self._contract is not None
-        hero_uploads: dict[str, str] = {}
-        for path in context.hero_image_paths[:1]:
-            if path.is_file():
-                hero_uploads["garment_reference"] = (
-                    self._client.upload_image(path, subfolder="garment_replacer_motion")
+        declared = self._contract.declared_inputs()
+        candidates: dict[str, Any] = {}
+
+        for logical_name, sequence in staged.items():
+            binding = self._contract.binding(logical_name)
+            if binding is None:
+                continue
+            candidates[logical_name] = self._sequence_value(context, request, sequence, binding)
+
+        # A LAST_FRAME-style contract still gets the frame it asks for, taken
+        # from the tail of the same gathered context -- never a different frame.
+        if request.context_frames:
+            for single in ("context_frame", "source_frame"):
+                if single in declared:
+                    tail = (
+                        context.candidate_dir
+                        / "comfy_inputs"
+                        / f"chunk_{request.chunk_index:04d}"
+                        / "context_last.png"
+                    )
+                    write_frame(tail, request.context_frames[-1])
+                    candidates[single] = (
+                        self._client.upload_file(
+                            tail,
+                            subfolder=self._upload_subfolder(
+                                context, request.chunk_index, "context_frame"
+                            ),
+                        )
+                        if self._comfy_config.upload_inputs
+                        else str(tail)
+                    )
+
+        hero_slots = ("hero_reference", "hero_reference_back", "hero_reference_side")
+        for slot, path in zip(hero_slots, context.hero_image_paths, strict=False):
+            if slot in declared and path.is_file():
+                candidates[slot] = (
+                    self._client.upload_file(
+                        path,
+                        subfolder=self._upload_subfolder(context, request.chunk_index, "hero"),
+                    )
                     if self._comfy_config.upload_inputs
                     else str(path)
                 )
+        # Legacy contracts reused `garment_reference` for the hero image before
+        # `hero_reference` existed; keep them working rather than silently
+        # leaving the character reference unbound.
+        if "garment_reference" in declared and "hero_reference" in candidates:
+            candidates["garment_reference"] = candidates["hero_reference"]
 
-        candidates: dict[str, Any] = {
-            **staged,
-            **hero_uploads,
-            "seed": request.seed,
-            "width": context.candidate.width,
-            "height": context.candidate.height,
-            "batch_size": request.frame_count,
-            "frame_index": request.start_frame,
-            "output_prefix": f"{context.candidate.id}_chunk{request.chunk_index:04d}",
-            "steps": int(request.settings.get("steps", 20)),
-            "denoise": float(request.settings.get("denoise", 1.0)),
-            "guidance_scale": float(request.settings.get("guidance_scale", 5.0)),
-            "prompt": str(request.settings.get("prompt", "")),
-            "negative_prompt": str(request.settings.get("negative_prompt", "")),
-        }
-        declared = {binding.logical_name for binding in self._contract.bindings}
+        candidates.update(
+            {
+                "seed": request.seed,
+                "width": context.candidate.width,
+                "height": context.candidate.height,
+                "fps": context.candidate.fps,
+                "batch_size": request.frame_count,
+                "frame_count": request.frame_count,
+                "start_frame": request.start_frame,
+                "frame_index": request.start_frame,
+                "output_prefix": f"{context.candidate.id}_chunk{request.chunk_index:04d}",
+                "steps": int(request.settings.get("steps", 20)),
+                "denoise": float(request.settings.get("denoise", 1.0)),
+                "guidance_scale": float(request.settings.get("guidance_scale", 5.0)),
+                "prompt": str(request.settings.get("prompt", "")),
+                "negative_prompt": str(request.settings.get("negative_prompt", "")),
+            }
+        )
         return {name: value for name, value in candidates.items() if name in declared}
 
 
-__all__ = ["BACKEND_NAME", "BACKEND_VERSION", "ComfyUIAnimatorBackend"]
+__all__ = ["BACKEND_NAME", "BACKEND_VERSION", "UPLOAD_SUBFOLDER", "ComfyUIAnimatorBackend"]

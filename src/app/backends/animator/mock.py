@@ -2,8 +2,8 @@
 
 It draws the Hero Character as a flat-shaded articulated figure following the
 composed pose, on a stable background. That is enough to exercise the whole
-master-creation path — chunking, context frames, resume, QC, manifests and the
-acceptance gate — while being impossible to mistake for photoreal output.
+master-creation path — chunking, resume, QC, manifests and the acceptance gate
+— while being impossible to mistake for photoreal output.
 
 Determinism comes from deriving everything from ``(seed, frame_index,
 hero_key)``. No state carries between chunks, so animating frames 40-60 alone
@@ -12,6 +12,16 @@ bit-exact.
 
 The background is a function of the hero key alone, not of the frame index, so
 the background-consistency QC check has something real to measure.
+
+**Context mode is ``none``, deliberately.** Every frame here is a pure function
+of ``(hero, pose, seed, frame_index)``, so there is nothing for this backend to
+condition on and nothing it could honestly claim to have consumed. Declaring
+``last_frame`` or ``sequence`` would make the manifest record context frames the
+renderer never looked at, which is exactly the dishonesty
+:class:`~app.backends.animator.base.ContextMode` exists to prevent. A real
+animator declares what it really reads; the pipeline then gathers exactly that
+much and no more. The gathering path for the other two modes is covered by stub
+backends in the test suite.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ from app.backends.animator.base import (
     AnimatorCapabilities,
     AnimatorContext,
     CharacterAnimatorBackend,
+    ContextMode,
 )
 from app.backends.base import HealthStatus
 from app.core.config import AppConfig
@@ -67,7 +78,7 @@ class MockAnimatorBackend(CharacterAnimatorBackend):
             requires_gpu=False,
             requires_model_weights=False,
             deterministic=True,
-            supports_context_frames=True,
+            context_mode=ContextMode.NONE,
             max_chunk_frames=256,
             recommended_chunk_frames=self._config.animator.chunk_frames,
             recommended_overlap_frames=self._config.animator.overlap_frames,
@@ -80,6 +91,11 @@ class MockAnimatorBackend(CharacterAnimatorBackend):
                     "Output is intentionally schematic, not photoreal."
                 ),
                 "determinism": "pixels derive from (seed, frame_index, hero_key)",
+                "context": (
+                    "None. Each frame is independent, so chunk boundaries are "
+                    "continuous without conditioning. A real animator will "
+                    "declare last_frame or sequence."
+                ),
             },
         )
 
@@ -123,8 +139,10 @@ class MockAnimatorBackend(CharacterAnimatorBackend):
             seed=request.seed,
             backend_metadata={
                 "deterministic": True,
-                "context_frames_used": len(request.context_frames),
-                "conditioned_on_previous": bool(request.context_frames),
+                # Truthfully zero: see the module docstring. The pipeline hands
+                # this backend no context because it declares ContextMode.NONE.
+                "context_frames_used": 0,
+                "conditioned_on_previous": False,
             },
             duration_ms=int((time.perf_counter() - started) * 1000),
         )

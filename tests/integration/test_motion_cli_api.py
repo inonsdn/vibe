@@ -217,6 +217,34 @@ def test_motion_and_master_workflow_through_the_cli(context, config, data_root: 
     assert accepted.exit_code == 0, accepted.output
     assert payload(accepted)["candidate"]["status"] == "accepted"
 
+    # Accepted is not promoted: the garment pipeline needs a HumanTemplate.
+    assert payload(accepted)["candidate"]["promoted_template_id"] is None
+
+    promoted = invoke(
+        data_root,
+        "--json",
+        "master",
+        "promote",
+        candidate_id,
+        "--transition-anchor",
+        "40",
+        "--by",
+        "operator",
+    )
+    assert promoted.exit_code == 0, promoted.output
+    promotion = payload(promoted)["promotion"]
+    assert promotion["created"] is True
+    assert promotion["transition_anchor"] == 40
+    assert promotion["intro"] == [0, 40]
+    template_id = promotion["template_id"]
+
+    listed = invoke(data_root, "--json", "template", "list")
+    assert listed.exit_code == 0, listed.output
+    assert any(t["id"] == template_id for t in payload(listed)["templates"])
+
+    inspected_after = invoke(data_root, "--json", "master", "inspect", candidate_id)
+    assert payload(inspected_after)["candidate"]["promoted_template_id"] == template_id
+
 
 def test_cli_acceptance_is_refused_without_qc(context, data_root: Path) -> None:
     from app.pipeline.master_create import (
@@ -353,6 +381,66 @@ def test_full_motion_flow_over_http(client: TestClient, api_context) -> None:
         },
     ).json()
     assert accepted["accepted"] is True
+    assert accepted["candidate"]["promoted_template_id"] is None
+
+    promoted = client.post(
+        f"/master/candidates/{candidate_id}/promote",
+        json={"transition_anchor": 32, "promoted_by": "operator"},
+    )
+    assert promoted.status_code == 200, promoted.text
+    body = promoted.json()
+    assert body["promotion"]["created"] is True
+    assert body["template"]["transition_anchor_frame"] == 32
+    template_id = body["template"]["id"]
+
+    # Idempotent over HTTP too.
+    again = client.post(
+        f"/master/candidates/{candidate_id}/promote",
+        json={"transition_anchor": 32},
+    ).json()
+    assert again["promotion"]["created"] is False
+    assert again["template"]["id"] == template_id
+
+    state = client.get(f"/master/candidates/{candidate_id}").json()
+    assert state["promoted_template_id"] == template_id
+    assert client.get(f"/templates/{template_id}").status_code == 200
+
+
+def test_api_promotion_is_refused_before_acceptance(client: TestClient, api_context) -> None:
+    from app.pipeline.master_create import (
+        MasterCreateOptions,
+        animate_master,
+        create_master_candidate,
+    )
+    from app.pipeline.motion_compose import ComposeOptions, SegmentSpec, compose_motion
+
+    a, _ = mf.make_motion_pair(api_context, a_range=(0, 30), b_range=(0, 30))
+    hero = mf.make_hero(api_context)
+    composition = compose_motion(
+        api_context,
+        ComposeOptions(
+            display_name="unaccepted",
+            segments=[SegmentSpec(motion_source_id=a.source.id, exposed_views=["front"])],
+            joins=[],
+            make_preview=False,
+        ),
+    ).composition
+    candidate = create_master_candidate(
+        api_context,
+        MasterCreateOptions(
+            display_name="unaccepted",
+            composition_id=composition.id,
+            hero_character_id=hero.id,
+            backend_name="mock",
+            seed=5,
+        ),
+    )
+    animate_master(api_context, candidate.id)
+
+    response = client.post(
+        f"/master/candidates/{candidate.id}/promote", json={"transition_anchor": 10}
+    )
+    assert response.status_code == 409, response.text
 
 
 def test_api_acceptance_requires_a_substantive_reason(client: TestClient, api_context) -> None:

@@ -64,8 +64,41 @@ Logical inputs the pipeline can supply:
 | `width`, `height`, `frame_index`, `batch_size` | Frame facts |
 | `output_prefix` | `<job_id>_<frame_index>`, so concurrent jobs cannot collide |
 
+Character animation adds sequence-level inputs, because a chunk is 8–24 frames
+and a workflow that receives one still is not animating anything:
+
+| Name | Value |
+| --- | --- |
+| `pose_sequence` | **Every pose in the chunk**, in order, as one asset |
+| `context_sequence` | Every accepted context frame handed to the chunk, in order |
+| `context_frame` | Just the last one, for a workflow that only wants that |
+| `hero_reference`, `hero_reference_back`, `hero_reference_side` | Hero Character references |
+| `frame_count`, `batch_size` | How many frames this submission must produce |
+| `start_frame`, `fps` | Where the chunk sits in the output, and at what rate |
+
 A contract declaring a name outside this set fails to load, rather than being
 silently ignored at render time.
+
+### Binding kinds
+
+| `kind` | What the bound value is |
+| --- | --- |
+| `value` | A scalar written straight into the node input |
+| `image_path` | A local path (ComfyUI reads it directly) |
+| `image_upload` | Uploaded to ComfyUI's `input/`; the value is the returned name |
+| `sequence_dir` | A directory of ordinal-numbered PNGs; the value is the input-relative folder |
+| `sequence_video` | One visually lossless clip (`-qp 0`, `yuv444p`); the value is the uploaded file |
+
+`pose_sequence` and `context_sequence` **must** use a `sequence_*` kind, and a
+`sequence_*` kind may only be used for them. A sequence input bound as a single
+still is precisely the bug this validation exists to catch.
+
+Sequence assets are staged per chunk under
+`<candidate>/comfy_inputs/chunk_NNNN/`, with a `sequence.json` manifest mapping
+each ordinal position back to its absolute output frame index. Files are named
+by ordinal (`pose_00000.png`, …) so a directory-loading node reads them in frame
+order under plain lexicographic sort; the manifest is what keeps the mapping to
+absolute indices auditable.
 
 ## Two workflows, two backends
 
@@ -82,12 +115,44 @@ Both refuse remote endpoints, both bind by node title, and both report
 additionally reports `produces_photoreal: False` — the honest value until a real
 workflow has been reviewed.
 
-The animator submits **one prompt per chunk** and expects exactly `batch_size`
-frames back, in order. The shipped placeholder returns a single image, so the
-backend rejects it with a clear count mismatch; that is correct behaviour and is
-exercised by the tests.
+The animator submits **one prompt per chunk**. Before it submits anything it
+checks that
 
-## The shipped placeholder
+* the chunk's poses cover the requested range exactly, with no gap or duplicate;
+* the contract declares `pose_sequence` and `batch_size` — without the latter
+  the output count is the workflow's guess, not the chunk's;
+* the contract has somewhere to put the context it was handed, matching the
+  backend's declared `ContextMode`;
+* the staged pose sequence has one entry per requested frame, in order, and the
+  staged context sequence matches the frames the pipeline gathered.
+
+After collecting it checks that exactly `batch_size` frames came back and that
+no output image was returned twice. The frame counts it records in the manifest
+come from the staged assets, so the manifest cannot claim context the workflow
+never received.
+
+`ComfyUIAnimatorBackend` declares `ContextMode.SEQUENCE` and honours it: every
+gathered context frame is staged and bound, not just the last one.
+
+## The shipped placeholders
+
+### Character animation
+
+`workflows/comfyui/character_animate_placeholder.json` binds the full sequence
+contract — `pose_sequence`, `context_sequence`, `batch_size`, `frame_count`,
+`hero_reference`, `width`, `height`, `output_prefix` — and blends the pose run
+over a repeated character reference.
+
+Its directory loader (`LoadImagesFromDirectory`) is **not** a core ComfyUI node:
+it comes from a directory-loading custom node pack. That is deliberate and
+honest — a real multi-frame workflow needs one, and `prepare()` reports exactly
+which node types your install is missing rather than pretending. Install the
+pack yourself; this application never downloads anything.
+
+The placeholder loads the context sequence and throws it away, so chunk
+continuity cannot be evaluated with it. It is a wiring test, not an animator.
+
+### Garment replacement
 
 `workflows/comfyui/garment_replace_placeholder.json` uses **core nodes only** —
 `LoadImage`, `LoadImageMask`, `ImageScale`, `ImageCompositeMasked`,

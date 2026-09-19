@@ -53,6 +53,9 @@ from app.pipeline.template_ingest import build_video_spec
 
 logger = get_logger(__name__)
 
+#: Used when no canonical profile can be loaded. Matches the shipped profile.
+DEFAULT_CONFIDENCE_THRESHOLD = 0.35
+
 
 def motion_source_id() -> str:
     return new_id("mot")
@@ -259,7 +262,8 @@ def import_pose(
         imported.append(index)
 
     poses = load_pose_sequence(destination)
-    quality = measure_pose_quality(poses, context.config)
+    threshold = profile_confidence_threshold(context)
+    quality = measure_pose_quality(poses, threshold)
     bbox = BoundingBoxStats.model_validate(summarize_bbox(poses))
     digest = sha256_dir(destination, patterns=("*.json",))
 
@@ -290,15 +294,45 @@ def import_pose(
     )
 
 
-def measure_pose_quality(poses: list[PoseFrame], config: Any) -> MotionQualityMetrics:
-    """Summarise how usable a pose sequence is."""
-    if not poses:
-        return MotionQualityMetrics()
+def profile_confidence_threshold(context: ServiceContext) -> float:
+    """The canonical profile's confidence threshold, with a safe fallback.
 
-    threshold = config.motion_qc.max_missing_joint_run  # noqa: F841 - documented below
+    Quality measurement must use the *same* threshold the normalizer will,
+    otherwise a source is reported as high quality and then refused.
+    """
+    try:
+        from app.pipeline.motion_compose import load_profile
+
+        return load_profile(context).confidence_threshold
+    except Exception:
+        logger.warning(
+            "profile_threshold_unavailable",
+            extra={"event": "profile_threshold_unavailable"},
+        )
+        return DEFAULT_CONFIDENCE_THRESHOLD
+
+
+def measure_pose_quality(
+    poses: list[PoseFrame],
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+) -> MotionQualityMetrics:
+    """Summarise how usable a pose sequence is.
+
+    ``confidence_threshold`` is applied consistently: a joint below it counts as
+    *missing* for every purpose — body measurements, missing-joint runs, and the
+    count of frames that carry a usable pose. Treating only ``confidence <= 0``
+    as missing made a sequence of placed-but-uncertain joints look like
+    high-quality motion, which normalization would then refuse.
+    """
+    if not poses:
+        return MotionQualityMetrics(confidence_threshold=confidence_threshold)
+
     confidences = [joint.confidence for pose in poses for joint in pose.body.values()]
-    shoulders = [w for w in (p.shoulder_width(0.0) for p in poses) if w]
-    torsos = [t for t in (p.torso_length(0.0) for p in poses) if t]
+
+    # Measurements use confident joints only, so an uncertain frame cannot pull
+    # the median body size around.
+    shoulders = [w for w in (p.shoulder_width(confidence_threshold) for p in poses) if w]
+    torsos = [t for t in (p.torso_length(confidence_threshold) for p in poses) if t]
 
     def median(values: list[float]) -> float | None:
         if not values:
@@ -313,10 +347,16 @@ def measure_pose_quality(poses: list[PoseFrame], config: Any) -> MotionQualityMe
     for name in HIGH_PRIORITY_JOINTS:
         best = current = 0
         for pose in poses:
-            joint = pose.joint(name)
-            current = current + 1 if joint is None or joint.confidence <= 0.0 else 0
+            missing = pose.confident_joint(name, confidence_threshold) is None
+            current = current + 1 if missing else 0
             best = max(best, current)
         runs[name] = best
+
+    # A frame carries a pose only if its torso is confidently resolvable --
+    # that is what every downstream stage actually needs from it.
+    usable_frames = sum(
+        1 for pose in poses if pose.has_all(HIGH_PRIORITY_JOINTS, confidence_threshold)
+    )
 
     shoulder_median = median(shoulders)
     variation = None
@@ -324,7 +364,7 @@ def measure_pose_quality(poses: list[PoseFrame], config: Any) -> MotionQualityMe
         variation = (max(shoulders) - min(shoulders)) / shoulder_median
 
     return MotionQualityMetrics(
-        frames_with_pose=len(poses),
+        frames_with_pose=usable_frames,
         mean_joint_confidence=(sum(confidences) / len(confidences)) if confidences else 0.0,
         min_joint_confidence=min(confidences) if confidences else 0.0,
         longest_missing_run=max(runs.values(), default=0),
@@ -332,6 +372,8 @@ def measure_pose_quality(poses: list[PoseFrame], config: Any) -> MotionQualityMe
         median_shoulder_width_px=shoulder_median,
         median_torso_length_px=median(torsos),
         shoulder_width_variation=variation,
+        in_frame_fraction=usable_frames / len(poses),
+        confidence_threshold=confidence_threshold,
     )
 
 
@@ -364,15 +406,44 @@ def extract_pose(
 
     destination = context.absolute(record.pose_dir)
     indices = list(record.selected_range.indices())
-    pose_adapter.run(
-        frames_dir=Path(record.source_video_path).parent,
+    source_video = Path(record.source_video_path)
+    if not source_video.is_file():
+        raise NotFoundError(
+            "Motion source video is no longer readable; cannot extract pose",
+            motion_source_id=record.id,
+            path=str(source_video),
+        )
+
+    # The adapter is given the video and the exact frame range. It is NOT given
+    # a directory: a motion reference has no extracted frames by design, and
+    # handing over the video's parent folder would expose unrelated files.
+    estimate = getattr(pose_adapter, "estimate_sequence", None)
+    if estimate is None:
+        raise ValidationError(
+            "Pose adapter does not implement estimate_sequence(video_path=…)",
+            adapter=capability.name,
+        )
+    estimate(
+        video_path=source_video,
         output_dir=destination,
         frame_indices=indices,
-        options={"fps": record.video.fps},
+        fps=record.video.fps,
+        options={"selected_range": [record.selected_range.start, record.selected_range.end]},
     )
 
     poses = load_pose_sequence(destination)
-    quality = measure_pose_quality(poses, context.config)
+    written = sorted(p.frame_index for p in poses)
+    if written != indices:
+        raise ValidationError(
+            "Pose adapter wrote frame indices that do not match the selected range; "
+            "poses must keep the source clip's own numbering",
+            expected_first=indices[0] if indices else None,
+            expected_last=indices[-1] if indices else None,
+            written_first=written[0] if written else None,
+            written_last=written[-1] if written else None,
+            motion_source_id=record.id,
+        )
+    quality = measure_pose_quality(poses, profile_confidence_threshold(context))
     bbox = BoundingBoxStats.model_validate(summarize_bbox(poses))
     digest = sha256_dir(destination, patterns=("*.json",))
 
@@ -498,6 +569,7 @@ def validate_motion_source(
 
 
 __all__ = [
+    "DEFAULT_CONFIDENCE_THRESHOLD",
     "MotionIngestOptions",
     "MotionIngestResult",
     "MotionValidation",
@@ -506,5 +578,6 @@ __all__ = [
     "import_pose",
     "ingest_motion_source",
     "measure_pose_quality",
+    "profile_confidence_threshold",
     "validate_motion_source",
 ]

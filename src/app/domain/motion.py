@@ -103,8 +103,11 @@ class MotionQualityMetrics(DomainModel):
     median_shoulder_width_px: float | None = None
     median_torso_length_px: float | None = None
     shoulder_width_variation: float | None = Field(default=None, ge=0.0)
-    #: Fraction of frames where the person is substantially in frame.
+    #: Fraction of frames whose high-priority joints are all confident.
     in_frame_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: The confidence threshold these numbers were measured at. Recorded so a
+    #: stored metric can never be compared against a different threshold.
+    confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @property
     def is_usable(self) -> bool:
@@ -243,11 +246,25 @@ class AnchorDescriptor(DomainModel):
     mean_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+def segment_dirname(index: int, motion_source_id: str) -> str:
+    """Per-segment directory name for normalized poses.
+
+    Keyed by the segment's **position**, not just its source: one composition
+    may legitimately use the same motion source twice (two different ranges of
+    the same clip), and keying on the source id alone made the second segment
+    overwrite the first.
+    """
+    return f"segment_{index:03d}_{motion_source_id}"
+
+
 class MotionSegment(DomainModel):
     """One trimmed, normalized stretch of a motion source."""
 
     motion_source_id: Identifier
     motion_source_version: int = Field(ge=1)
+    #: Position of this segment within its composition; also names its pose
+    #: directory, so two segments from one source cannot collide.
+    segment_index: int = Field(default=0, ge=0)
 
     source_range: FrameRange
     playback_speed: float = Field(default=1.0, gt=0.0, le=4.0)
@@ -283,6 +300,11 @@ class MotionSegment(DomainModel):
     def source_key(self) -> str:
         return f"{self.motion_source_id}@v{self.motion_source_version}"
 
+    @property
+    def pose_dirname(self) -> str:
+        """Directory holding this segment's normalized poses."""
+        return segment_dirname(self.segment_index, self.motion_source_id)
+
 
 class MotionJoin(DomainModel):
     """The measured decision to cut from one segment to the next.
@@ -312,10 +334,49 @@ class MotionJoin(DomainModel):
     bridge_settings: dict[str, Any] = Field(default_factory=dict)
     bridge_metrics: dict[str, Any] = Field(default_factory=dict)
 
+    # -- output-space geometry --------------------------------------------
+    # The source-frame anchors above identify frames in each segment's OWN clip
+    # numbering. After normalization and bridge insertion those numbers no
+    # longer locate anything in the composed sequence, so they cannot be used to
+    # choose a garment reveal seam. These fields record where the join actually
+    # landed in output numbering, and are filled by the assembler.
+    #: First bridge frame, in output numbering (inclusive).
+    output_bridge_start: int | None = Field(default=None, ge=0)
+    #: One past the last bridge frame, in output numbering (exclusive).
+    output_bridge_end: int | None = Field(default=None, ge=0)
+    #: Where a garment reveal should begin if this join is the seam. Defaults to
+    #: the bridge start: everything before it is the borrowed opening motion,
+    #: everything from it on is the new performance.
+    recommended_transition_anchor: int | None = Field(default=None, ge=0)
+
     operator_override: bool = False
     accepted: bool = False
     warnings: list[str] = Field(default_factory=list)
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def output_bridge_range(self) -> tuple[int, int] | None:
+        """``(start, end)`` of the bridge in output numbering, when known."""
+        if self.output_bridge_start is None or self.output_bridge_end is None:
+            return None
+        return (self.output_bridge_start, self.output_bridge_end)
+
+    @model_validator(mode="after")
+    def _output_range_is_coherent(self) -> Self:
+        start, end = self.output_bridge_start, self.output_bridge_end
+        if (start is None) != (end is None):
+            raise ValueError("output_bridge_start and output_bridge_end must be set together")
+        if start is not None and end is not None:
+            if end <= start:
+                raise ValueError(
+                    f"output_bridge_end ({end}) must exceed output_bridge_start ({start})"
+                )
+            if end - start != self.bridge_frame_count:
+                raise ValueError(
+                    f"output bridge span ({end - start}) disagrees with "
+                    f"bridge_frame_count ({self.bridge_frame_count})"
+                )
+        return self
 
     @model_validator(mode="after")
     def _segments_are_adjacent(self) -> Self:
@@ -422,4 +483,5 @@ __all__ = [
     "MotionUsageRights",
     "SegmentQualityFlags",
     "TransitionType",
+    "segment_dirname",
 ]

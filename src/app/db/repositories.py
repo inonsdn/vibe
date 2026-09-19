@@ -174,6 +174,19 @@ class TemplateRepository:
         )
         return int(row["v"]) if row and row["v"] is not None else None
 
+    def delete(self, template_id: str, version: int) -> bool:
+        """Remove exactly one (id, version) row.
+
+        This exists so a failed promotion can roll its own record back — it is
+        not a general "delete my template" facility, and it deliberately takes
+        an explicit version rather than defaulting to "all of them".
+        """
+        cursor = self._db.execute(
+            "DELETE FROM human_templates WHERE id = ? AND version = ?",
+            (template_id, version),
+        )
+        return bool(cursor.rowcount)
+
 
 class GarmentRepository:
     def __init__(self, database: Database) -> None:

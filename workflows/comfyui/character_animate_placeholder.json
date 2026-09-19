@@ -1,8 +1,12 @@
 {
   "1": {
-    "class_type": "LoadImage",
-    "_meta": { "title": "POSE_CONTROL" },
-    "inputs": { "image": "placeholder_pose.png", "upload": "image" }
+    "class_type": "LoadImagesFromDirectory",
+    "_meta": { "title": "POSE_SEQUENCE" },
+    "inputs": {
+      "directory": "garment_replacer_motion/pose_sequence",
+      "image_load_cap": 24,
+      "start_index": 0
+    }
   },
   "2": {
     "class_type": "LoadImage",
@@ -10,9 +14,13 @@
     "inputs": { "image": "placeholder_hero.png", "upload": "image" }
   },
   "3": {
-    "class_type": "LoadImage",
-    "_meta": { "title": "CONTEXT_PREVIOUS_FRAME" },
-    "inputs": { "image": "placeholder_context.png", "upload": "image" }
+    "class_type": "LoadImagesFromDirectory",
+    "_meta": { "title": "CONTEXT_SEQUENCE" },
+    "inputs": {
+      "directory": "garment_replacer_motion/context_sequence",
+      "image_load_cap": 16,
+      "start_index": 0
+    }
   },
   "4": {
     "class_type": "ImageScale",
@@ -26,20 +34,25 @@
     }
   },
   "5": {
+    "class_type": "RepeatImageBatch",
+    "_meta": { "title": "HERO_BATCH" },
+    "inputs": { "image": ["4", 0], "amount": 24 }
+  },
+  "6": {
     "class_type": "ImageBlend",
     "_meta": { "title": "POSE_OVER_CHARACTER" },
     "inputs": {
-      "image1": ["4", 0],
+      "image1": ["5", 0],
       "image2": ["1", 0],
       "blend_factor": 0.5,
       "blend_mode": "normal"
     }
   },
-  "6": {
+  "7": {
     "class_type": "SaveImage",
     "_meta": { "title": "ANIMATED_FRAMES_OUT" },
     "inputs": {
-      "images": ["5", 0],
+      "images": ["6", 0],
       "filename_prefix": "garment_replacer_motion/placeholder"
     }
   }

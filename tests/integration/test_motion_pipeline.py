@@ -122,10 +122,10 @@ def test_bridge_endpoints_equal_the_selected_anchors(context, composition) -> No
 
     normalized_root = context.absolute(comp.normalized_pose_dir)
     prev_anchor = load_pose_sequence(
-        normalized_root / comp.segments[0].motion_source_id, [join.prev_source_frame]
+        normalized_root / comp.segments[0].pose_dirname, [join.prev_source_frame]
     )[0]
     next_anchor = load_pose_sequence(
-        normalized_root / comp.segments[1].motion_source_id, [join.next_source_frame]
+        normalized_root / comp.segments[1].pose_dirname, [join.next_source_frame]
     )[0]
 
     assert poses_equal(bridge[0], prev_anchor, tolerance=0.0)
@@ -348,16 +348,72 @@ def test_master_animation_produces_every_frame(context, composition, hero) -> No
     assert not result.candidate.remaining_frames()
 
 
-def test_chunks_are_conditioned_on_previous_frames(context, composition, hero) -> None:
+def test_the_mock_animator_records_the_context_it_really_consumed(
+    context, composition, hero
+) -> None:
+    """None. The mock paints each frame independently, so it says so.
+
+    The failure this guards against is the opposite one: a backend that reports
+    16 context frames while the renderer looked at zero. What is recorded per
+    chunk must be what the backend declared and was handed.
+    """
+    from app.backends.animator.base import ContextMode
+    from app.backends.animator.mock import MockAnimatorBackend
+
+    assert MockAnimatorBackend(context.config).capabilities().context_mode is ContextMode.NONE
+
     candidate = make_candidate(context, composition, hero)
     result = animate_master(context, candidate.id)
     chunks = sorted(result.candidate.chunks, key=lambda c: c.index)
     assert len(chunks) > 1, "the fixture must exercise more than one chunk"
-    assert chunks[0].overlap_frames == 0  # nothing precedes the first chunk
+    for chunk in chunks:
+        assert chunk.context_mode == "none"
+        assert chunk.overlap_frames == 0
+        assert chunk.context_frames == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("last_frame", 1), ("sequence", 16)],
+)
+def test_the_pipeline_gathers_exactly_the_declared_context(
+    context, composition, hero, monkeypatch, mode, expected
+) -> None:
+    """A declaring backend gets the tail it declared -- contiguous, and ending
+    at the frame immediately before the chunk."""
+    from app.backends.animator.base import ContextMode
+    from app.backends.animator.mock import MockAnimatorBackend
+
+    declared = ContextMode(mode)
+    original_capabilities = MockAnimatorBackend.capabilities
+    original_animate = MockAnimatorBackend.animate_chunk
+    seen: dict[int, list[int]] = {}
+
+    def capabilities(self):  # type: ignore[no-untyped-def]
+        caps = original_capabilities(self)
+        caps.context_mode = declared
+        return caps
+
+    def animate(self, animator_context, request):  # type: ignore[no-untyped-def]
+        seen[request.chunk_index] = list(request.context_frame_indices)
+        assert len(request.context_frames) == len(request.context_poses)
+        request.validate()
+        return original_animate(self, animator_context, request)
+
+    monkeypatch.setattr(MockAnimatorBackend, "capabilities", capabilities)
+    monkeypatch.setattr(MockAnimatorBackend, "animate_chunk", animate)
+
+    candidate = make_candidate(context, composition, hero)
+    result = animate_master(context, candidate.id)
+    chunks = sorted(result.candidate.chunks, key=lambda c: c.index)
+    assert len(chunks) > 1
+
+    assert seen[0] == [], "nothing precedes the first chunk"
     for chunk in chunks[1:]:
-        assert chunk.overlap_frames > 0
-        assert chunk.context_frames
-        assert max(chunk.context_frames) == chunk.start_frame - 1
+        assert chunk.context_mode == mode
+        assert chunk.overlap_frames == expected
+        assert chunk.context_frames == list(range(chunk.start_frame - expected, chunk.start_frame))
+        assert seen[chunk.index] == chunk.context_frames
 
 
 def test_master_frames_match_the_canonical_profile(context, composition, hero) -> None:

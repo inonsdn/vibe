@@ -38,6 +38,7 @@ from app.domain.motion import (
     MotionSegment,
     SegmentQualityFlags,
     TransitionType,
+    segment_dirname,
 )
 from app.motion.anchors import (
     AnchorCandidate,
@@ -170,12 +171,18 @@ class NormalizedSegment:
     """One segment's normalized poses, keyed by their own source frame index."""
 
     spec: SegmentSpec
+    index: int
     source_id: str
     source_version: int
     effective_range: FrameRange
     poses: list[PoseFrame]
     transform: CanonicalTransform
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def pose_dirname(self) -> str:
+        """Unique per position, so one source used twice cannot collide."""
+        return segment_dirname(self.index, self.source_id)
 
     def position_of(self, source_frame: int) -> int:
         for position, pose in enumerate(self.poses):
@@ -194,6 +201,7 @@ def normalize_segment(
     profile: CanonicalSkeletonProfile,
     *,
     output_fps: float,
+    index: int = 0,
 ) -> NormalizedSegment:
     """Normalize one segment independently of every other segment."""
     record = context.repos.motion_sources.get(spec.motion_source_id, spec.motion_source_version)
@@ -251,6 +259,7 @@ def normalize_segment(
     )
     return NormalizedSegment(
         spec=spec,
+        index=index,
         source_id=record.id,
         source_version=record.version,
         effective_range=effective,
@@ -335,11 +344,12 @@ def compose_motion(
 
     warnings: list[str] = []
     normalized: list[NormalizedSegment] = []
-    for spec in options.segments:
-        segment = normalize_segment(context, spec, profile, output_fps=output_fps)
+    for index, spec in enumerate(options.segments):
+        segment = normalize_segment(context, spec, profile, output_fps=output_fps, index=index)
         normalized.append(segment)
-        warnings.extend(f"{spec.motion_source_id}: {w}" for w in segment.warnings)
-        save_pose_sequence(normalized_dir / spec.motion_source_id, segment.poses)
+        warnings.extend(f"segment {index} ({spec.motion_source_id}): {w}" for w in segment.warnings)
+        # Keyed by segment position: the same source may appear twice.
+        save_pose_sequence(normalized_dir / segment.pose_dirname, segment.poses)
 
     # -- choose anchors ---------------------------------------------------
     joins: list[MotionJoin] = []
@@ -385,6 +395,7 @@ def compose_motion(
         MotionSegment(
             motion_source_id=segment.source_id,
             motion_source_version=segment.source_version,
+            segment_index=segment.index,
             source_range=FrameRange(
                 start=segment.effective_range.start - segment.spec.trim_start,
                 end=segment.effective_range.end + segment.spec.trim_end,
@@ -493,8 +504,12 @@ def compose_motion(
         composition=saved,
         poses=composed,
         anchor_frames=anchor_frames,
+        # Keyed by the segment's directory, not its source id: one composition
+        # may legitimately use the same clip twice, and keying on the source
+        # alone dropped the first segment's transform on the floor.
         normalization={
-            segment.source_id: segment.transform.model_dump(mode="json") for segment in normalized
+            segment.pose_dirname: segment.transform.model_dump(mode="json")
+            for segment in normalized
         },
         preview=preview,
         warnings=warnings,
@@ -588,6 +603,9 @@ def assemble_sequence(
             join = joins[index]
             next_segment = normalized[index + 1]
             if join.transition_type is TransitionType.DIRECT_CUT:
+                # No bridge frames, but the seam is still a real output frame:
+                # the next segment's first contributed frame.
+                join.recommended_transition_anchor = output_index
                 continue
 
             settings = BridgeSettings(
@@ -610,6 +628,14 @@ def assemble_sequence(
             )
             anchor_frames.add(output_index)
             anchor_frames.add(output_index + len(result.poses) - 1)
+
+            # Output-space geometry: the source anchors above cannot locate
+            # anything in the composed sequence, so record where this join
+            # actually landed. The recommended garment seam is the bridge start.
+            join.output_bridge_start = output_index
+            join.output_bridge_end = output_index + len(result.poses)
+            join.recommended_transition_anchor = output_index
+
             composed.extend(result.poses)
             bridges.extend(result.poses)
             output_index += len(result.poses)
@@ -617,6 +643,12 @@ def assemble_sequence(
             join.bridge_settings = result.settings
             join.bridge_metrics = result.metrics
             join.warnings.extend(result.warnings)
+
+    # Pydantic does not re-validate on assignment, and the joins above were
+    # mutated in place. Re-validate them explicitly so the output-space
+    # coherence rule (span == bridge_frame_count) is actually enforced rather
+    # than merely declared.
+    joins[:] = [MotionJoin.model_validate(join.model_dump()) for join in joins]
 
     return composed, anchor_frames, bridges
 
@@ -680,7 +712,9 @@ def _build_manifest(
         "skeleton_profile": composition.settings.get("profile", {}),
         "segments": [
             {
+                "segment_index": segment.index,
                 "motion_source": f"{segment.source_id}@v{segment.source_version}",
+                "pose_dir": segment.pose_dirname,
                 "effective_range": [
                     segment.effective_range.start,
                     segment.effective_range.end,
@@ -722,6 +756,8 @@ def _build_manifest(
                     "prev": join.prev_source_frame,
                     "next": join.next_source_frame,
                     "bridge": join.bridge_frame_count,
+                    "output_bridge": join.output_bridge_range,
+                    "recommended_anchor": join.recommended_transition_anchor,
                     "settings": join.bridge_settings,
                 }
                 for join in joins

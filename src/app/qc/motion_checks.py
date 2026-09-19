@@ -440,10 +440,10 @@ def _check_bridge_endpoints(
         prev_source = composition.segments[join.prev_segment_index]
         next_source = composition.segments[join.next_segment_index]
         prev_anchor = _load_normalized_pose(
-            normalized_root, prev_source.motion_source_id, join.prev_source_frame
+            normalized_root, prev_source.pose_dirname, join.prev_source_frame
         )
         next_anchor = _load_normalized_pose(
-            normalized_root, next_source.motion_source_id, join.next_source_frame
+            normalized_root, next_source.pose_dirname, join.next_source_frame
         )
         start_ok = prev_anchor is not None and poses_equal(
             by_index[group[0]], prev_anchor, tolerance=tolerance
@@ -451,20 +451,33 @@ def _check_bridge_endpoints(
         end_ok = next_anchor is not None and poses_equal(
             by_index[group[-1]], next_anchor, tolerance=tolerance
         )
+        # The recorded output geometry must match the frames actually emitted:
+        # promotion picks the garment seam from it, so a stale value would put
+        # the reveal in the wrong place.
+        recorded = join.output_bridge_range
+        geometry_ok = recorded == (group[0], group[-1] + 1)
         evidence.append(
             {
                 "join": position,
                 "bridge_frames": [group[0], group[-1]],
                 "anchor_prev_frame": join.prev_source_frame,
                 "anchor_next_frame": join.next_source_frame,
+                "recorded_output_bridge": list(recorded) if recorded else None,
+                "recommended_transition_anchor": join.recommended_transition_anchor,
                 "start_matches_anchor": start_ok,
                 "end_matches_anchor": end_ok,
+                "output_geometry_matches": geometry_ok,
             }
         )
         if not start_ok:
             problems.append(f"join {position}: bridge start does not equal the previous anchor")
         if not end_ok:
             problems.append(f"join {position}: bridge end does not equal the next anchor")
+        if not geometry_ok:
+            problems.append(
+                f"join {position}: recorded output bridge {recorded} does not match "
+                f"the emitted frames [{group[0]}, {group[-1] + 1})"
+            )
 
     metrics["bridge_endpoints"] = evidence
     if not problems:
@@ -482,10 +495,10 @@ def _check_bridge_endpoints(
     )
 
 
-def _load_normalized_pose(root: Path, source_id: str, frame_index: int) -> PoseFrame | None:
+def _load_normalized_pose(root: Path, segment_dir: str, frame_index: int) -> PoseFrame | None:
     from app.motion.pose_format import load_pose_frame, pose_path
 
-    path = pose_path(root / source_id, frame_index)
+    path = pose_path(root / segment_dir, frame_index)
     return load_pose_frame(path) if path.is_file() else None
 
 
@@ -810,14 +823,22 @@ def _check_chunk_boundaries(
     if missing:
         problems.append(f"{len(missing)} frame(s) covered by no chunk")
 
+    # A backend that declares ContextMode.NONE consumes nothing by design, so
+    # its zero-context chunks are not a defect -- reporting them as one would
+    # train operators to ignore the warning that matters. A backend that
+    # declares it *does* condition and then gets no frames is the real fault.
+    modes = sorted({chunk.context_mode for chunk in chunks})
+    conditioning = [chunk for chunk in chunks if chunk.context_mode != "none"]
     unconditioned = [
-        chunk.index for chunk in chunks if chunk.index > 0 and chunk.overlap_frames == 0
+        chunk.index for chunk in conditioning if chunk.index > 0 and chunk.overlap_frames == 0
     ]
     evidence = {
         "chunks": len(chunks),
         "duplicate_frames": duplicates[:16],
         "uncovered_frames": missing[:16],
+        "context_modes": modes,
         "chunks_without_context": unconditioned,
+        "context_frames_total": sum(chunk.overlap_frames for chunk in chunks),
     }
     metrics["chunk_boundaries"] = evidence
 
@@ -833,6 +854,14 @@ def _check_chunk_boundaries(
             f"{len(unconditioned)} chunk(s) were generated without context frames, "
             "so their boundaries are unconditioned.",
             severity=CheckSeverity.WARNING,
+            metrics=evidence,
+        )
+    if not conditioning:
+        return passed(
+            "master_chunk_boundaries",
+            f"{len(chunks)} chunk(s) tile the sequence exactly. The animator "
+            "declares context_mode=none, so boundaries are unconditioned by "
+            "design; judge continuity from the frames, not from this check.",
             metrics=evidence,
         )
     return passed(

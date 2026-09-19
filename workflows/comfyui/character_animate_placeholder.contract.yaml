@@ -2,26 +2,43 @@
 #
 # PURPOSE
 # -------
-# This proves the plumbing between the application and ComfyUI for the master
-# creation path, without requiring a single model weight. The workflow it binds
-# uses only core ComfyUI nodes:
+# This proves the *sequence* plumbing between the application and ComfyUI for
+# the master creation path, without requiring a single model weight. It is a
+# wiring test. Its output is not character animation and must never be judged
+# as such.
 #
-#   LoadImage, ImageScale, ImageBlend, SaveImage
+# WHY THIS BINDS SEQUENCES, NOT STILLS
+# ------------------------------------
+# A chunk is 8-24 output frames. A workflow that receives one pose image for a
+# whole chunk is not animating anything, and a backend that uploads one pose
+# while the manifest records 24 is lying. So the contract binds:
 #
-# It blends a pose control image over the Hero Character reference. The result
-# is NOT an animated character -- it is a wiring test, and its output should
-# never be judged as character animation.
+#   pose_sequence     every pose in the chunk, in order, as one asset
+#   context_sequence  every accepted context frame handed to this chunk, in order
+#   batch_size        the number of frames the workflow must return
+#
+# The backend validates all three against the chunk before it submits anything.
+#
+# NODE TYPES
+# ----------
+# `LoadImagesFromDirectory` is NOT a core ComfyUI node; it comes from a
+# directory-loading custom node pack (several exist). That is deliberate and
+# honest: a real multi-frame workflow needs one, and `prepare()` will tell you
+# plainly which node types your installation is missing rather than pretending.
+# Install the pack yourself -- this application never downloads anything.
+# `RepeatImageBatch`, `LoadImage`, `ImageScale`, `ImageBlend` and `SaveImage`
+# are core.
 #
 # WHAT A REAL WORKFLOW MUST DO THAT THIS DOES NOT
 # -----------------------------------------------
-# 1. Actually animate the Hero Character into the supplied pose.
-# 2. Produce `batch_size` frames per submission, one per pose in the chunk, in
-#    frame order. This placeholder returns one image, so the ComfyUI animator
-#    backend will reject it with a clear count mismatch -- which is the correct
-#    behaviour and is exercised by the tests.
-# 3. Condition on `source_frame` (the last accepted frame of the previous chunk)
-#    so chunk boundaries are continuous rather than merely adjacent.
-# 4. Hold the background fixed across chunks.
+# 1. Actually animate the Hero Character into the supplied poses.
+# 2. Condition on `context_sequence` so chunk boundaries are continuous rather
+#    than merely adjacent. This placeholder loads it and throws it away, which
+#    is why chunk continuity cannot be evaluated with this workflow.
+# 3. Hold the background fixed across chunks.
+# 4. Bind `seed`, `steps`, `denoise`, `guidance_scale`, `start_frame` and `fps`
+#    where its sampler and temporal modules need them. All six are supported
+#    logical inputs; this placeholder has no sampler, so it binds none of them.
 #
 # CONNECTING A REAL WORKFLOW
 # --------------------------
@@ -35,41 +52,59 @@
 workflow_id: character_animate_placeholder
 workflow_file: character_animate_placeholder.json
 description: >-
-  Wiring-test workflow for the character animation path. Core ComfyUI nodes
-  only: blends a pose control image over a character reference. No checkpoints,
-  no custom nodes, no model weights, and NOT a character animator.
+  Wiring-test workflow for the character animation path. Blends a pose control
+  sequence over a repeated character reference. No checkpoints, no model
+  weights, and NOT a character animator.
 
 requires_model_nodes: false
 
 inputs:
-  - logical_name: pose
-    node_title: POSE_CONTROL
-    input_name: image
-    kind: image_upload
+  - logical_name: pose_sequence
+    node_title: POSE_SEQUENCE
+    input_name: directory
+    kind: sequence_dir
     required: true
     description: >-
-      Skeleton control image rendered from the composed pose for this frame, in
-      the canonical output size.
+      Every pose in the chunk, rendered as skeleton control images in the
+      canonical output size and named by ordinal position so a directory loader
+      reads them in frame order. One asset per chunk; never a single still.
 
-  - logical_name: garment_reference
+  - logical_name: frame_count
+    node_title: POSE_SEQUENCE
+    input_name: image_load_cap
+    kind: value
+    required: false
+    description: >-
+      How many frames of the pose sequence to load. Equals the chunk's frame
+      count; a cap below it would silently animate a short chunk.
+
+  - logical_name: context_sequence
+    node_title: CONTEXT_SEQUENCE
+    input_name: directory
+    kind: sequence_dir
+    required: false
+    description: >-
+      The already-accepted frames immediately preceding this chunk, in order.
+      This is the continuity signal. Absent for the first chunk.
+
+  - logical_name: hero_reference
     node_title: HERO_CHARACTER_REFERENCE
     input_name: image
     kind: image_upload
     required: true
     description: >-
-      The Hero Character reference image. Reuses the `garment_reference` logical
-      name because the pipeline's upload plumbing is shared; a real workflow may
-      bind additional references.
+      The Hero Character reference image. A real workflow may additionally bind
+      hero_reference_back and hero_reference_side.
 
-  - logical_name: source_frame
-    node_title: CONTEXT_PREVIOUS_FRAME
-    input_name: image
-    kind: image_upload
-    required: false
+  - logical_name: batch_size
+    node_title: HERO_BATCH
+    input_name: amount
+    kind: value
+    required: true
     description: >-
-      The last accepted frame of the previous chunk. This is the continuity
-      signal: a real workflow must condition on it so chunk boundaries do not
-      show. Absent for the first chunk.
+      The number of frames this submission must return -- the chunk's frame
+      count. The backend refuses to submit a contract that does not bind this,
+      because otherwise the output count is the workflow's guess.
 
   - logical_name: width
     node_title: CANONICAL_OUTPUT_SIZE
@@ -98,8 +133,14 @@ output_node_titles:
 notes:
   chunking: >-
     The backend submits one prompt per chunk and expects exactly `batch_size`
-    frames back, in order. Bind `batch_size` in a real workflow and make the
-    sampler produce that many frames.
+    frames back, in order. It validates before submitting that the staged pose
+    sequence has exactly one entry per requested frame, that the context
+    sequence matches the context frames the pipeline gathered, and after
+    collecting that the returned frames are unique and in order.
+  context: >-
+    This contract declares `context_sequence`, so the backend may report
+    ContextMode.SEQUENCE honestly. The placeholder graph loads the sequence and
+    does not use it; a real workflow must feed it into a temporal module.
   vram: >-
     Core image nodes only; peak VRAM is negligible. A real character animation
     workflow on an 8GB card should use a chunk of 8-24 frames, 12-24 context
@@ -111,5 +152,5 @@ notes:
     and comparing frame hashes before determinism is claimed anywhere.
   not_an_animator: >-
     Do not evaluate character animation quality with this workflow. It exists to
-    prove that pose control arrives, outputs come back, chunk resume works and
-    manifests are complete.
+    prove that a pose sequence arrives, that outputs come back one per frame,
+    that chunk resume works and that manifests are complete.

@@ -8,16 +8,22 @@ to get one, and they meet at the same place:
 | Origin | How | When |
 | --- | --- | --- |
 | **`captured_master`** | Film an authorized performer, then `app template ingest` | You can shoot the performance you want |
-| **`synthetic_master`** | Borrow motion from reference clips, animate an original Hero Character, then accept it | You cannot shoot it, or you want one character across many motions |
+| **`synthetic_master`** | Borrow motion from reference clips, animate an original Hero Character, accept it, then promote it | You cannot shoot it, or you want one character across many motions |
 
-A synthetic master is built in [`motion-composition.md`](motion-composition.md)
-and **requires explicit operator acceptance** before it can be used. Once
-accepted it is an immutable master like any other, and everything from "Once per
-character / step 3" below applies unchanged.
+A synthetic master is built in [`motion-composition.md`](motion-composition.md).
+It **requires explicit operator acceptance**, and then a separate
+`app master promote` step that builds the `HumanTemplate` the garment pipeline
+renders. Once promoted it is an immutable master like any other, and everything
+from "Once per character / step 3" below applies unchanged.
 
 The rest of this document describes the captured path. For the synthetic path,
-do the motion phase first, accept the master, then rejoin at step 3 (authoring
-masks).
+do the motion phase first, accept the master, promote it, then rejoin at step 3
+(authoring masks):
+
+```bash
+app master accept <candidate_id> --by "your name" --reason "..."
+app master promote <candidate_id> --transition-anchor <frame> --by "your name"
+```
 
 ## Once per character
 

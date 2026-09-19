@@ -200,7 +200,7 @@ def register_motion_source(
         selected_range=FrameRange(start=start, end=end),
         pose_dir=context.relative(pose_dir),
         pose_origin="imported",
-        quality=measure_pose_quality(sequence, context.config),
+        quality=measure_pose_quality(sequence, TEST_PROFILE["confidence_threshold"]),
         usage_rights=MotionUsageRights(
             motion_use_authorized=authorized,
             rights_holder="Test Fixture",

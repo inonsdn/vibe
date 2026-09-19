@@ -395,9 +395,13 @@ def _animate_chunks(
     chunk_frames = min(
         int(candidate.settings.get("chunk_frames", 24)), capabilities.max_chunk_frames
     )
-    overlap = int(candidate.settings.get("overlap_frames", 16))
-
-    plan = plan_chunks(candidate.frame_count, chunk_frames, overlap)
+    configured_overlap = int(candidate.settings.get("overlap_frames", 16))
+    # The plan tiles the sequence using the *configured* overlap, so chunk
+    # boundaries do not move when a backend is swapped. How much of that tail is
+    # actually read and handed over is the backend's declared business.
+    plan = plan_chunks(candidate.frame_count, chunk_frames, configured_overlap)
+    context_mode = capabilities.context_mode
+    effective_overlap = capabilities.context_frames_for(configured_overlap)
     done = {c["chunk_index"] for c in context.repos.masters.completed_chunks(candidate.id)}
     pending = [chunk for chunk in plan if chunk[0] not in done]
     if max_chunks is not None:
@@ -412,14 +416,22 @@ def _animate_chunks(
         # exactly the same conditioning a single-pass run would.
         context_indices = [
             index
-            for index in range(max(0, start - overlap), start)
+            for index in range(max(0, start - effective_overlap), start)
             if frame_path(frames_dir, index).is_file()
         ]
-        context_frames: list[np.ndarray] = []
-        if capabilities.supports_context_frames:
-            context_frames = [
-                read_frame(frame_path(frames_dir, index)) for index in context_indices
-            ]
+        # Contiguity matters: the request contract says context frames are the
+        # run immediately preceding the chunk, so a hole in the middle means
+        # this is not a valid tail and nothing may be claimed about it.
+        if context_indices and context_indices != list(range(context_indices[0], start)):
+            raise ValidationError(
+                "Context frames preceding the chunk are not contiguous",
+                chunk_index=chunk_index,
+                start_frame=start,
+                available=context_indices,
+            )
+        context_frames: list[np.ndarray] = [
+            read_frame(frame_path(frames_dir, index)) for index in context_indices
+        ]
 
         request = AnimationChunkRequest(
             chunk_index=chunk_index,
@@ -484,6 +496,7 @@ def _animate_chunks(
                 end_frame=end,
                 context_frames=context_indices,
                 overlap_frames=len(context_indices),
+                context_mode=context_mode.value,
                 seed=result.seed,
                 frame_hashes=hashes,
                 duration_ms=result.duration_ms,

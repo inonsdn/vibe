@@ -21,12 +21,19 @@ produced in chunks. Chunks are never hard-concatenated: each request carries
 backend is expected to condition on them. The pipeline then keeps only the
 chunk's *new* frames, so the overlap region is generated once and reused, not
 generated twice and crossfaded.
+
+**Context honesty.** :class:`ContextMode` states what a backend actually
+consumes, and the pipeline gathers exactly that much. Reporting "16 context
+frames" while handing a workflow a single image is the specific failure this
+enum exists to prevent: the number in the manifest has to be the number the
+model saw.
 """
 
 from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +44,22 @@ from app.core.config import AppConfig
 from app.domain.master import HeroCharacter, MasterCandidate
 from app.domain.motion import CanonicalSkeletonProfile, MotionComposition
 from app.motion.pose_format import PoseFrame
+
+
+class ContextMode(StrEnum):
+    """How much continuity context a backend consumes between chunks."""
+
+    #: Conditions on nothing. Chunk boundaries are unconditioned, and the
+    #: pipeline does not waste IO gathering frames the backend will ignore.
+    NONE = "none"
+    #: Consumes the single frame immediately preceding the chunk.
+    LAST_FRAME = "last_frame"
+    #: Consumes the whole configured tail, in order.
+    SEQUENCE = "sequence"
+
+    @property
+    def uses_context(self) -> bool:
+        return self is not ContextMode.NONE
 
 
 @dataclass
@@ -64,11 +87,10 @@ class AnimatorContext:
 class AnimationChunkRequest:
     """One contiguous chunk of frames to animate.
 
-    ``poses`` covers ``[start_frame, end_frame)``. ``context_frames`` and
-    ``context_poses`` describe already-accepted frames immediately before it —
-    the continuity signal. A backend that cannot condition on them must say so
-    via ``supports_context_frames``; the pipeline then records that the chunk
-    boundary is unconditioned, rather than pretending otherwise.
+    ``poses`` covers ``[start_frame, end_frame)``, in order, with no gaps.
+    ``context_frames`` and ``context_poses`` describe already-accepted frames
+    immediately before it — the continuity signal — and are sized by the
+    backend's :class:`ContextMode`.
     """
 
     chunk_index: int
@@ -87,6 +109,46 @@ class AnimationChunkRequest:
     @property
     def frame_indices(self) -> list[int]:
         return list(range(self.start_frame, self.end_frame))
+
+    @property
+    def context_frame_indices(self) -> list[int]:
+        """Output indices of the context frames, immediately preceding the chunk."""
+        return list(range(self.start_frame - len(self.context_frames), self.start_frame))
+
+    def validate(self) -> None:
+        """Structural checks a backend may rely on. Raises on violation."""
+        from app.core.errors import ValidationError
+
+        if self.end_frame <= self.start_frame:
+            raise ValidationError(
+                "Chunk end_frame must exceed start_frame",
+                start_frame=self.start_frame,
+                end_frame=self.end_frame,
+            )
+        indices = [pose.frame_index for pose in self.poses]
+        if indices != self.frame_indices:
+            raise ValidationError(
+                "Chunk pose sequence does not cover the requested frames exactly",
+                expected_first=self.start_frame,
+                expected_last=self.end_frame - 1,
+                expected_count=self.frame_count,
+                got_count=len(indices),
+                got_first=indices[0] if indices else None,
+                got_last=indices[-1] if indices else None,
+            )
+        if self.context_poses and len(self.context_poses) != len(self.context_frames):
+            raise ValidationError(
+                "Context frames and context poses must come in matching counts",
+                frames=len(self.context_frames),
+                poses=len(self.context_poses),
+            )
+        context_indices = [pose.frame_index for pose in self.context_poses]
+        if context_indices and context_indices != self.context_frame_indices:
+            raise ValidationError(
+                "Context poses are not the frames immediately preceding the chunk",
+                expected=self.context_frame_indices,
+                got=context_indices,
+            )
 
 
 @dataclass
@@ -107,7 +169,7 @@ class AnimatorCapabilities:
     requires_gpu: bool
     requires_model_weights: bool
     deterministic: bool
-    supports_context_frames: bool
+    context_mode: ContextMode
     max_chunk_frames: int
     recommended_chunk_frames: int
     recommended_overlap_frames: int
@@ -116,6 +178,19 @@ class AnimatorCapabilities:
     produces_photoreal: bool = False
     notes: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def supports_context_frames(self) -> bool:
+        """Back-compatible view of :attr:`context_mode`."""
+        return self.context_mode.uses_context
+
+    def context_frames_for(self, configured_overlap: int) -> int:
+        """How many context frames this backend will actually consume."""
+        if self.context_mode is ContextMode.NONE:
+            return 0
+        if self.context_mode is ContextMode.LAST_FRAME:
+            return min(1, configured_overlap)
+        return configured_overlap
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -123,6 +198,7 @@ class AnimatorCapabilities:
             "requires_gpu": self.requires_gpu,
             "requires_model_weights": self.requires_model_weights,
             "deterministic": self.deterministic,
+            "context_mode": self.context_mode.value,
             "supports_context_frames": self.supports_context_frames,
             "max_chunk_frames": self.max_chunk_frames,
             "recommended_chunk_frames": self.recommended_chunk_frames,
@@ -177,4 +253,5 @@ __all__ = [
     "AnimatorCapabilities",
     "AnimatorContext",
     "CharacterAnimatorBackend",
+    "ContextMode",
 ]

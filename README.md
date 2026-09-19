@@ -28,15 +28,29 @@ bytes everywhere else.
 | Origin | How you get it | Usable when |
 | --- | --- | --- |
 | `captured_master` | `app template ingest` an authorized performer video | Immediately |
-| `synthetic_master` | Compose motion, animate a Hero Character, then **accept** it | Only after an operator explicitly accepts it following QC |
+| `synthetic_master` | Compose motion, animate a Hero Character, **accept** it, then **promote** it | Only after an operator accepts it following QC *and* it has been promoted to a template |
 
 A synthetic master borrows **motion only**: the original people, faces, clothes,
 backgrounds and pixels never appear in the result. Motion artifacts are pose
 JSON, and a QC check fails if any image file appears among them. See
 [`docs/motion-composition.md`](docs/motion-composition.md).
 
-Once accepted, a synthetic master is immutable and the garment pipeline cannot
-tell the difference — deliberately.
+Acceptance and promotion are two separate acts, deliberately:
+
+* **`app master accept`** is the human judgement — "yes, this is our character,
+  performing correctly". It changes status and writes an audit record. It does
+  **not** make the master renderable.
+* **`app master promote`** does the work — it freezes the generated PNG frames
+  into a `HumanTemplate`, splits them into intro and reveal at a transition
+  anchor, and records the hashes every later render is checked against.
+
+Promotion never re-encodes: the frames the animator generated are hardlinked (or
+copied) into the template byte for byte, because an H.264 round trip would
+quantise exactly the pixels the pipeline later promises to preserve. An archival
+MP4 is written alongside for operators to watch; nothing reads it back.
+
+Once promoted, a synthetic master is immutable and the garment pipeline cannot
+tell the difference from a captured one — deliberately.
 
 ## How it works
 
@@ -200,7 +214,8 @@ Full specification: [`docs/mask-semantics.md`](docs/mask-semantics.md).
 | `app master animate` | Animate it in chunks (resumable) |
 | `app master qc` | Master QC + manifest |
 | `app master inspect` | Status, chunks, acceptance state |
-| `app master accept` | Promote a candidate to an immutable master (audited) |
+| `app master accept` | Record the operator's acceptance of a candidate (audited) |
+| `app master promote` | Build the immutable `HumanTemplate` the garment pipeline renders |
 | `app offline verify` | Prove no cloud/network dependency |
 | `app serve` | Localhost HTTP API |
 
@@ -214,7 +229,7 @@ logs go to stderr, so piping stays clean).
 | Document | Contents |
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | Components, data flow, invariants, design decisions |
-| [`docs/motion-composition.md`](docs/motion-composition.md) | Motion references, normalization, anchors, bridges, the acceptance gate |
+| [`docs/motion-composition.md`](docs/motion-composition.md) | Motion references, normalization, anchors, bridges, acceptance and promotion |
 | [`docs/windows-setup.md`](docs/windows-setup.md) | Windows 11 + RTX 5060 8GB setup, step by step |
 | [`docs/data-layout.md`](docs/data-layout.md) | Directory layout and file format specification |
 | [`docs/mask-semantics.md`](docs/mask-semantics.md) | Mask values, families, combination order, authoring |

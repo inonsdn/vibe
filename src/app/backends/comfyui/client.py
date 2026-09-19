@@ -264,22 +264,56 @@ class ComfyUIClient:
         }
         return sorted(needed - installed)
 
-    def upload_image(self, path: str | Path, *, subfolder: str = "", overwrite: bool = True) -> str:
-        """Upload a local image into ComfyUI's input folder; returns its name."""
+    #: Media types this client will stage into ComfyUI's input folder. Images
+    #: for control frames, video for pose-control sequences. Anything else is
+    #: refused rather than guessed at.
+    _UPLOAD_TYPES: dict[str, str] = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".mp4": "video/mp4",
+        ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
+    }
+
+    def upload_file(
+        self,
+        path: str | Path,
+        *,
+        subfolder: str = "",
+        overwrite: bool = True,
+        content_type: str | None = None,
+    ) -> str:
+        """Stage a local file into ComfyUI's input folder; returns its name.
+
+        Generic on purpose: a multi-frame animation workflow needs a pose-control
+        *sequence*, not a single still, and ComfyUI's ``/upload/image`` endpoint
+        stores whatever it is given under ``input/``. This adds no new network
+        surface — it is the same localhost endpoint :meth:`upload_image` uses.
+        """
         source = Path(path)
         if not source.is_file():
             raise BackendError("Cannot upload a file that does not exist", path=str(source))
+        media_type = content_type or self._UPLOAD_TYPES.get(source.suffix.lower())
+        if media_type is None:
+            raise BackendError(
+                "Refusing to upload a file type this client does not stage",
+                path=str(source),
+                suffix=source.suffix,
+                supported=sorted(self._UPLOAD_TYPES),
+            )
         with source.open("rb") as handle:
             response = self._request(
                 "POST",
                 ENDPOINT_UPLOAD,
-                files={"image": (source.name, handle, "image/png")},
+                files={"image": (source.name, handle, media_type)},
                 data={
                     "overwrite": "true" if overwrite else "false",
                     "type": "input",
                     "subfolder": subfolder,
                 },
-                timeout=max(60.0, self._config.request_timeout_s),
+                timeout=max(120.0, self._config.request_timeout_s),
             )
         payload = self._json(response, ENDPOINT_UPLOAD)
         name = payload.get("name") if isinstance(payload, dict) else None
@@ -287,6 +321,10 @@ class ComfyUIClient:
             raise BackendError("ComfyUI upload did not return a filename", body=str(payload)[:500])
         sub = payload.get("subfolder") or ""
         return f"{sub}/{name}" if sub else str(name)
+
+    def upload_image(self, path: str | Path, *, subfolder: str = "", overwrite: bool = True) -> str:
+        """Upload a local image into ComfyUI's input folder; returns its name."""
+        return self.upload_file(path, subfolder=subfolder, overwrite=overwrite)
 
     def submit(self, graph: dict[str, Any], *, client_id: str | None = None) -> PromptHandle:
         """Queue a workflow graph for execution."""

@@ -15,6 +15,24 @@ Output contract: one JSON per frame in the format defined by
 :mod:`app.motion.pose_format` — ``{"schema_version", "frame_index",
 "timestamp_s", "body": {joint: {x, y, confidence}}, …}``.
 
+**Input contract.** Two entry points, because the two callers genuinely differ:
+
+``run(frames_dir=…)``
+    The generic :class:`~app.adapters.base.AnalysisAdapter` shape, for a template
+    whose frames are already extracted on disk.
+``estimate_sequence(video_path=…, frame_range=…)``
+    The Motion Composition entry point. A motion reference has **no** extracted
+    frames — deliberately, so its pixels are never copied — so the adapter is
+    given the video file itself plus the exact frame range to read.
+
+An earlier version passed ``Path(video).parent`` as ``frames_dir``, which is
+neither the video nor a controlled frame sequence and could contain anything
+else the operator happened to leave in that folder.
+
+**Frame numbering.** Written poses keep the *source* clip's frame indices, so
+``frame_000042.json`` is frame 42 of the reference video regardless of where the
+selected range starts. Downstream normalization relies on that alignment.
+
 Three implementations live here:
 
 * :class:`PoseAdapter` — the interface a real model must satisfy
@@ -49,16 +67,20 @@ class PoseAdapter(AnalysisAdapter):
     def estimate_sequence(
         self,
         *,
-        frames_dir: Path,
+        video_path: Path,
         output_dir: Path,
         frame_indices: list[int],
         fps: float,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Estimate poses for ``frame_indices`` and write them to ``output_dir``.
+        """Estimate poses for ``frame_indices`` of ``video_path``.
 
-        Implementations must be deterministic for a fixed input and must write
-        the internal pose JSON format. They must not modify ``frames_dir``.
+        ``frame_indices`` are indices in the *source clip*, and the written pose
+        files must use those same indices — not a 0-based rewrite of them.
+
+        Implementations must be deterministic for a fixed input, must write the
+        internal pose JSON format into ``output_dir``, and must treat
+        ``video_path`` as read-only.
         """
         self.require_available()
         raise AssertionError("unreachable")  # pragma: no cover
@@ -237,6 +259,25 @@ class MockPoseAdapter(PoseAdapter):
             source_bbox=bbox,
         )
 
+    def _write(
+        self, output_dir: Path, frame_indices: list[int], fps: float, source: str
+    ) -> dict[str, Any]:
+        from app.motion.pose_format import save_pose_sequence
+
+        # Poses keep the SOURCE clip's frame indices, so a range starting at 12
+        # writes frame_000012.json, not frame_000000.json.
+        poses = [self.pose_at(index, fps=fps) for index in frame_indices]
+        written = save_pose_sequence(output_dir, poses)
+        return {
+            "adapter": self.name,
+            "synthetic": True,
+            "frames": len(written),
+            "first_frame": written[0] if written else None,
+            "last_frame": written[-1] if written else None,
+            "output_dir": str(output_dir),
+            "input": source,
+        }
+
     def run(
         self,
         *,
@@ -245,33 +286,22 @@ class MockPoseAdapter(PoseAdapter):
         frame_indices: list[int],
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        from app.motion.pose_format import save_pose_sequence
-
-        fps = float((options or {}).get("fps", 30.0))
-        poses = [self.pose_at(index, fps=fps) for index in frame_indices]
-        written = save_pose_sequence(output_dir, poses)
-        return {
-            "adapter": self.name,
-            "synthetic": True,
-            "frames": len(written),
-            "output_dir": str(output_dir),
-        }
+        """Frame-directory entry point (the generic adapter shape)."""
+        return self._write(
+            output_dir, frame_indices, float((options or {}).get("fps", 30.0)), str(frames_dir)
+        )
 
     def estimate_sequence(
         self,
         *,
-        frames_dir: Path,
+        video_path: Path,
         output_dir: Path,
         frame_indices: list[int],
         fps: float,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.run(
-            frames_dir=frames_dir,
-            output_dir=output_dir,
-            frame_indices=frame_indices,
-            options={**(options or {}), "fps": fps},
-        )
+        """Video entry point, used by Motion Composition."""
+        return self._write(output_dir, frame_indices, fps, str(video_path))
 
 
 __all__ = ["MockPoseAdapter", "PoseAdapter", "pose_stub"]

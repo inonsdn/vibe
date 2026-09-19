@@ -1612,6 +1612,7 @@ def master_inspect(
             f"manifest   {candidate.manifest_path or '-'}",
             f"qc report  {candidate.qc_report_path or '-'}",
             f"accepted   {candidate.is_accepted}",
+            f"promoted   {candidate.promoted_template_id or '-'}",
         ]
         if candidate.acceptance:
             lines.append(
@@ -1622,6 +1623,12 @@ def master_inspect(
         if not candidate.is_accepted:
             lines.append("")
             lines.append("This candidate cannot be used as a master until it is accepted.")
+        elif not candidate.promoted_template_id:
+            lines.append("")
+            lines.append(
+                "Accepted, but not yet promoted: the garment pipeline needs a "
+                "HumanTemplate. Run `app master promote`."
+            )
         _emit(
             {
                 "candidate": candidate.to_json_dict(),
@@ -1660,10 +1667,100 @@ def master_accept(
             f"qc passed  {candidate.acceptance.qc_passed if candidate.acceptance else False}",
             f"frames     {candidate.frame_count}",
             "",
-            "This master is now immutable. The garment pipeline operates on it "
-            "exactly as it does on a captured master.",
+            "This master is now immutable, but it is NOT yet usable by the "
+            "garment pipeline. Promote it to a HumanTemplate:",
+            f"  app master promote {candidate.id} --transition-anchor <frame>",
         ]
         _emit({"candidate": candidate.to_json_dict()}, "\n".join(lines), force_json=json_output)
+
+
+@master_app.command("promote")
+def master_promote_command(
+    candidate_id_arg: Annotated[str, typer.Argument(metavar="CANDIDATE_ID")],
+    transition_anchor: Annotated[
+        int | None,
+        typer.Option(
+            "--transition-anchor",
+            help=(
+                "First reveal frame. Omit to use the anchor the composition "
+                "recommended (only unambiguous with a single join)."
+            ),
+        ),
+    ] = None,
+    template_id_option: Annotated[
+        str | None, typer.Option("--template-id", help="Use this template id instead of a new one.")
+    ] = None,
+    display_name: Annotated[str | None, typer.Option("--name")] = None,
+    clothing_class: Annotated[
+        str,
+        typer.Option(
+            "--clothing-class",
+            help="What the Hero Character is wearing in the animated performance.",
+        ),
+    ] = "fitted_short",
+    promoted_by: Annotated[str, typer.Option("--by")] = "operator",
+    confirm_multiple_joins: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-multiple-joins",
+            help="Accept the first recommended anchor when the composition has several joins.",
+        ),
+    ] = False,
+    skip_archive_video: Annotated[
+        bool,
+        typer.Option(
+            "--skip-archive-video",
+            help="Do not encode the operator-facing MP4. Template pixels are unaffected.",
+        ),
+    ] = False,
+    json_output: JsonFlag = False,
+) -> None:
+    """Promote an accepted master into a HumanTemplate the garment pipeline uses.
+
+    Acceptance is a human decision; promotion is what actually builds the
+    template: it freezes the generated PNGs (never a re-encoded video), splits
+    them into intro and reveal at the transition anchor, and records the hashes
+    every later render is checked against.
+    """
+    from app.domain.enums import TemplateClothingClass
+    from app.pipeline.master_promote import PromoteOptions, promote_master
+
+    with _context() as context:
+        result = _run(
+            promote_master,
+            context,
+            candidate_id_arg,
+            PromoteOptions(
+                transition_anchor=transition_anchor,
+                template_id=template_id_option,
+                display_name=display_name,
+                template_clothing_class=TemplateClothingClass(clothing_class),
+                promoted_by=promoted_by,
+                confirm_multiple_joins=confirm_multiple_joins,
+                encode_archive_video=not skip_archive_video,
+            ),
+        )
+        template = result.template
+        lines = [
+            ("promoted   " if result.created else "already    ") + template.id,
+            f"candidate  {result.candidate.id}",
+            f"anchor     {result.transition_anchor}  ({result.anchor_source})",
+            f"intro      [{template.intro.start}, {template.intro.end})",
+            f"reveal     [{template.reveal.start}, {template.reveal.end})",
+            f"frames     {result.frames_linked}"
+            + ("  (hardlinked)" if result.hardlinked else "  (copied)"),
+            f"archive    {result.archive_video or '-'}",
+            "",
+            "Next: import masks for the reveal range, then run a compatibility",
+            f"check and a render job against template {template.id}.",
+        ]
+        for warning in result.warnings:
+            lines.append(f"warning: {warning}")
+        _emit(
+            {"promotion": result.as_dict(), "template": template.to_json_dict()},
+            "\n".join(lines),
+            force_json=json_output,
+        )
 
 
 @master_app.command("reject")

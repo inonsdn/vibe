@@ -17,6 +17,7 @@ from app.api.schemas import (
     MasterAcceptRequest,
     MasterAnimateRequest,
     MasterCreateRequest,
+    MasterPromoteRequest,
     MasterRejectRequest,
 )
 from app.backends.animator.registry import available_animators, create_animator
@@ -32,6 +33,7 @@ from app.pipeline.master_create import (
     resume_master,
     write_master_manifest,
 )
+from app.pipeline.master_promote import PromoteOptions, promote_master
 from app.qc.motion_checks import run_master_qc
 
 router = APIRouter(prefix="/master", tags=["master"])
@@ -115,6 +117,7 @@ def get_candidate(candidate_id: str, context: Ctx) -> dict[str, Any]:
         "frames_done": len(candidate.completed_chunk_frames()),
         "remaining_frames": len(candidate.remaining_frames()),
         "accepted": candidate.is_accepted,
+        "promoted_template_id": candidate.promoted_template_id,
     }
 
 
@@ -151,6 +154,31 @@ def post_accept(candidate_id: str, payload: MasterAcceptRequest, context: Ctx) -
         require_qc_pass=not payload.allow_qc_failure,
     )
     return {"candidate": candidate.to_json_dict(), "accepted": candidate.is_accepted}
+
+
+@router.post("/candidates/{candidate_id}/promote")
+def post_promote(candidate_id: str, payload: MasterPromoteRequest, context: Ctx) -> dict[str, Any]:
+    """Build the HumanTemplate the garment pipeline consumes.
+
+    Separate from acceptance on purpose: accepting is the human judgement,
+    promoting is the work. Idempotent — promoting twice returns the same
+    template rather than building a second one.
+    """
+    result = promote_master(
+        context,
+        candidate_id,
+        PromoteOptions(
+            transition_anchor=payload.transition_anchor,
+            template_id=payload.template_id,
+            display_name=payload.display_name,
+            template_clothing_class=payload.template_clothing_class,
+            promoted_by=payload.promoted_by,
+            confirm_multiple_joins=payload.confirm_multiple_joins,
+            encode_archive_video=payload.encode_archive_video,
+            notes=payload.notes,
+        ),
+    )
+    return {"promotion": result.as_dict(), "template": result.template.to_json_dict()}
 
 
 @router.post("/candidates/{candidate_id}/reject")

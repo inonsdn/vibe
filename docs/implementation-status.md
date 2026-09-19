@@ -52,11 +52,18 @@ not done. Nothing below claims a capability that has not been tested.
 | **Master creation** | | |
 | CharacterAnimatorBackend abstraction | Done | `src/app/backends/animator/base.py` |
 | Mock animator (CPU, deterministic) | Done | `tests/integration/test_motion_pipeline.py` |
-| Chunked animation + context conditioning | Done | same |
+| Chunked animation, context gathered per declared `ContextMode` | Done | same + `tests/unit/test_comfyui_animator.py` |
 | Chunk resume | Done | same |
 | Master QC (6 checks) | Done | same |
 | Master manifests | Done | same |
 | Operator acceptance gate | Done | same |
+| Promotion: accepted candidate → `HumanTemplate` | Done | `tests/integration/test_master_promotion.py` |
+| Promoted master renders an outfit end to end | Done | `test_a_promoted_master_completes_a_mock_garment_render` |
+| ComfyUI sequence contract (whole chunk, batch size, context) | Done | `tests/unit/test_comfyui_animator.py` |
+| Pose adapter input semantics (video + range, not a folder) | Done | `tests/unit/test_motion_inputs.py` |
+| Confidence threshold applied consistently | Done | same |
+| Reusing one motion source in a composition | Done | `tests/integration/test_motion_composition_reuse.py` |
+| Output-space join anchors + multi-join confirmation | Done | same |
 | Motion + master CLI and API | Done | `tests/integration/test_motion_cli_api.py` |
 
 **All tests pass** with no GPU, no model weights, no ComfyUI and no network —
@@ -91,9 +98,19 @@ See [`model-selection-checklist.md`](model-selection-checklist.md).
 ## The character animator: what is and is not proven
 
 **Proven by tests:** the abstraction, chunk planning (chunks tile the range
-exactly), context-frame conditioning, resume across process restarts, bit-exact
-determinism for identical inputs, manifest completeness, and the acceptance
-gate refusing incomplete or un-QC'd candidates.
+exactly), that the pipeline gathers exactly the context a backend declares it
+consumes, resume across process restarts, bit-exact determinism for identical
+inputs, manifest completeness, the acceptance gate refusing incomplete or
+un-QC'd candidates, and that an accepted candidate promotes into a
+`HumanTemplate` whose frames are the generated PNGs byte for byte and which
+then completes a mock garment render to a final MP4.
+
+**Context honesty.** `AnimatorCapabilities.context_mode` is `none`,
+`last_frame` or `sequence`, and the pipeline gathers exactly that much. The
+mock animator declares `none` — it paints every frame independently, so it has
+nothing to condition on, and claiming otherwise would put context frames in the
+manifest that no renderer ever looked at. `ComfyUIAnimatorBackend` declares
+`sequence` and stages every gathered frame.
 
 **Not proven, because it cannot be:** that any real model animates a Hero
 Character convincingly. The mock animator draws a schematic figure — flat
@@ -115,10 +132,18 @@ polling, timeout handling, vanished-prompt detection, missing-node-type
 reporting, output download, and that the placeholder workflow needs only core
 nodes.
 
+For the animator specifically, the sequence contract is proven on the wire: a
+`MockTransport` captures the submitted graph, and the tests assert that every
+pose in a chunk is uploaded exactly once in frame order, that `batch_size` is
+actually bound into the graph, that the whole context sequence is bound rather
+than just its last frame, that ordinals map back to absolute frame indices via
+the staged manifest, and that a short or duplicated output is refused.
+
 **Not proven, because it cannot be:** that any real garment workflow produces
 good output. No such workflow exists here. The placeholder flat-composites a
 reference image into the mask and looks nothing like clothing on a body — that
-is intentional; it is a wiring test.
+is intentional; it is a wiring test. The animation placeholder is the same:
+correct plumbing, visually useless output.
 
 **Not yet verified against a live ComfyUI:** the tests use a mock transport.
 The first time you point it at a real instance, expect to adjust for
@@ -132,7 +157,16 @@ when that happens.
 The dominant per-motion-reference cost. No pose model is installed, so pose JSON
 is produced externally and imported. A pose adapter is the highest-value
 integration for this phase, and its quality directly bounds what a synthetic
-master can be.
+master can be. The adapter seam itself is settled: `estimate_sequence` receives
+the video file and the exact source frame indices, and the poses it writes must
+carry those same indices — which is checked, not trusted.
+
+### The animation placeholder needs a custom node
+
+`character_animate_placeholder` binds `pose_sequence` to a
+`LoadImagesFromDirectory` node, which is not core ComfyUI. That is the honest
+shape of a multi-frame workflow; `prepare()` names the missing node classes
+rather than pretending. The garment placeholder is still core-nodes-only.
 
 ### The bridge is the least natural motion in a composition
 

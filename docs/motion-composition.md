@@ -166,10 +166,21 @@ An 8GB card cannot hold a long sequence, so animation is chunked. Chunks are
 stitched by **conditioning**, not concatenation:
 
 * chunks tile the output range exactly — no frame is generated twice;
-* each chunk receives the last 12–24 **accepted** frames as context;
-* a backend that cannot condition on them must report
-  `supports_context_frames: False`, and QC records the boundary as
-  unconditioned rather than pretending otherwise;
+* each chunk receives the last 12–24 **accepted** frames as context — but
+  only as many as the backend declares it consumes;
+* every backend declares a `ContextMode` in its capabilities:
+
+  | Mode | What the backend consumes | What the pipeline gathers |
+  | --- | --- | --- |
+  | `none` | nothing | nothing |
+  | `last_frame` | the single frame before the chunk | one frame |
+  | `sequence` | the whole configured tail, in order | `overlap_frames` frames |
+
+  The number recorded per chunk is the number the backend was handed, and QC
+  reads the declared mode rather than assuming. Reporting "16 context frames"
+  while a workflow receives one image is the specific failure this exists to
+  prevent. The mock animator declares `none`, honestly: it paints every frame
+  independently and has nothing to condition on;
 * the output size is fixed by the canonical profile, so no chunk can drift in
   framing.
 
@@ -192,6 +203,62 @@ status.
 
 Acceptance is written to the audit log with who, why and when, and is recorded
 in the manifest. An accepted master is immutable: re-animating it is refused.
+
+## Promotion: from accepted candidate to renderable template
+
+Acceptance is a judgement. Promotion is the work, and it is a separate command
+so that a failed promotion leaves an accepted candidate rather than a
+half-built template.
+
+`app master promote <candidate_id> --transition-anchor <frame>`:
+
+1. requires the candidate to be accepted, complete and QC'd;
+2. resolves the transition anchor — explicit, or the one the composition's join
+   recommended. With more than one join it refuses to guess: pass
+   `--transition-anchor`, or `--confirm-multiple-joins` to take the first
+   recommendation;
+3. validates the anchor leaves at least one intro frame and one reveal frame;
+4. **hardlinks (or copies) the generated PNGs** into
+   `templates/<id>/source_frames/`, byte for byte, and hashes them there;
+5. creates the `HumanTemplate` record with `intro = [0, anchor)`,
+   `reveal = [anchor, frame_count)`, the Hero Character's reference images as
+   identity references, and the hero's consent record;
+6. writes an archival MP4 for operators to watch, sets the candidate's
+   `video_path`, `output_hashes` and `promoted_template_id`, and audits it.
+
+**The PNGs are the source of truth.** Promotion never encodes to H.264 and
+decodes back: that would quantise and chroma-subsample exactly the pixels the
+garment pipeline later promises to restore outside the editable mask. The
+archival video exists for review, and nothing in the render path reads it.
+
+Promotion is idempotent — running it twice returns the same template. Promoting
+with a *different* anchor is refused: a promoted master is immutable, so make a
+new candidate instead. If any step fails, the template record and its directory
+are removed before the error propagates.
+
+### Where the anchor comes from
+
+Every join records, in **output** frame numbering:
+
+| Field | Meaning |
+| --- | --- |
+| `output_bridge_start` / `output_bridge_end` | the bridge's half-open range in the composed sequence |
+| `recommended_transition_anchor` | where the garment reveal should begin — the bridge start, i.e. the frame after the borrowed opening motion |
+| `prev_source_frame` / `next_source_frame` | the originating anchors in each source clip's own numbering |
+
+That is what lets `master promote` be run without an explicit anchor on a
+single-join composition, and what makes the operator's choice explicit on a
+multi-join one.
+
+## Reusing one motion source
+
+A composition may use the same reference clip more than once — two ranges of one
+performance is an ordinary thing to want. Normalized poses are therefore written
+to `normalized_poses/segment_<NNN>_<source_id>/`, keyed by the segment's
+**position** as well as its source. Keying on the source id alone made the
+second segment overwrite the first, silently. Each segment keeps its own
+canonical transform in the manifest and in the composition's normalization
+summary.
 
 ## Operator commands
 
@@ -234,6 +301,15 @@ app master qc <candidate_id>
 app master inspect <candidate_id>
 app master accept <candidate_id> --by "your name" \
     --reason "reviewed the bridge and framing; approved for production"
+
+# 9. Promote it into a template the garment pipeline can render.
+#    Omit --transition-anchor to use the composition's recommendation.
+app master promote <candidate_id> --transition-anchor 150 --by "your name"
+
+# 10. From here it is an ordinary template: masks, compatibility, render.
+app template import-masks <template_id> --kind garment --from ./masks/garment
+app compat check --template <template_id> --garment <garment_id>
+app job create --template <template_id> --garment <garment_id>
 ```
 
 Step 6 is the one that saves the most time. A bad bridge costs seconds to fix in

@@ -54,7 +54,7 @@ data/
 │   └── source_placeholder.bin  (tests) — no reference imagery is ever copied
 │
 ├── compositions/<composition_id>/
-│   ├── normalized_poses/<motion_source_id>/   per-source canonical poses
+│   ├── normalized_poses/segment_<NNN>_<motion_source_id>/  per-SEGMENT canonical poses
 │   ├── bridge_poses/           generated bridge poses
 │   ├── composed_poses/         the final contiguous sequence (0..N-1)
 │   ├── preview.mp4             skeleton preview, drawn from poses
@@ -64,8 +64,12 @@ data/
 ├── heroes/<hero_id>/images/    Hero Character reference images
 │
 ├── masters/<candidate_id>/
-│   ├── frames/                 candidate master frames
-│   ├── comfy_inputs/           per-chunk files staged for ComfyUI
+│   ├── frames/                 candidate master frames (the source of truth)
+│   ├── master_archive.mp4      archival only, written at promotion; never read back
+│   ├── comfy_inputs/chunk_NNNN/
+│   │   ├── pose_sequence/      pose_00000.png … + sequence.json (ordinal → frame)
+│   │   ├── context_sequence/   context_00000.png … + sequence.json
+│   │   └── poses/              pose_NNNNNN.json, the audit trail
 │   ├── manifest.json
 │   └── qc_report.{json,txt}
 │
@@ -74,6 +78,19 @@ data/
 ├── cache/ · logs/ · tmp/
 └── db/app.db
 ```
+
+## Promoted synthetic masters
+
+`app master promote` builds `templates/<template_id>/` with exactly the layout
+above. Its `source_frames/` are **hardlinks (or byte copies) of
+`masters/<candidate_id>/frames/`** — the PNGs the animator generated, unchanged.
+`source_frames_sha256` is computed over those files and re-checked before every
+render.
+
+`master_archive.mp4` is written for operators to watch and is what the
+template's `source_video_path` points at, but nothing in the render path decodes
+it. Encoding to H.264 and reading back would quantise and chroma-subsample
+precisely the pixels the pipeline promises to restore outside the editable mask.
 
 ## File formats
 

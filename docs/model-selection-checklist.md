@@ -91,8 +91,10 @@ editing pixels inside a mask.
    across the whole sequence. Drift over 200 frames is the common failure.
 3. **Chunk conditioning**: it must accept previously accepted frames as context
    and continue from them. A model that cannot will show a seam at every chunk
-   boundary, and `AnimatorCapabilities.supports_context_frames` must report
-   `False` so QC records the boundary honestly.
+   boundary, and its backend must declare `ContextMode.NONE` so QC records the
+   boundary honestly. Declare `LAST_FRAME` or `SEQUENCE` only for what the
+   workflow genuinely reads — the pipeline gathers exactly the declared amount,
+   and the manifest records exactly what was handed over.
 4. **A stable background** across chunks. The garment pipeline's
    `background_preserved` check later assumes the master's background holds
    still.

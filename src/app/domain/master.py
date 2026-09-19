@@ -111,6 +111,10 @@ class ChunkRecord(DomainModel):
     end_frame: int = Field(gt=0)
     context_frames: list[int] = Field(default_factory=list)
     overlap_frames: int = Field(default=0, ge=0)
+    #: What the backend declared it consumes: ``none``, ``last_frame`` or
+    #: ``sequence``. Recorded per chunk so QC can tell "this backend conditions
+    #: on nothing by design" apart from "this chunk lost its context".
+    context_mode: str = Field(default="sequence", pattern=r"^(none|last_frame|sequence)$")
     seed: int = Field(ge=0)
     frame_hashes: dict[str, str] = Field(default_factory=dict)
     duration_ms: int | None = None
@@ -195,7 +199,21 @@ class MasterCandidate(TimestampedModel):
             MasterCandidateStatus.REJECTED,
         }:
             raise ValueError(f"an acceptance record is meaningless in status {self.status.value}")
+        # Promotion is downstream of acceptance and cannot be undone by
+        # rewinding the status: a HumanTemplate now exists that points back at
+        # this candidate's frames.
+        if self.promoted_template_id is not None and self.status is not (
+            MasterCandidateStatus.ACCEPTED
+        ):
+            raise ValueError(
+                "a promoted candidate must stay accepted "
+                f"(status={self.status.value}, template={self.promoted_template_id})"
+            )
         return self
+
+    @property
+    def is_promoted(self) -> bool:
+        return self.promoted_template_id is not None
 
     @property
     def is_accepted(self) -> bool:

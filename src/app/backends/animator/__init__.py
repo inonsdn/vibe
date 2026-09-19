@@ -22,6 +22,7 @@ from app.backends.animator.base import (
     AnimatorCapabilities,
     AnimatorContext,
     CharacterAnimatorBackend,
+    ContextMode,
 )
 from app.backends.animator.registry import (
     available_animators,
@@ -35,6 +36,7 @@ __all__ = [
     "AnimatorCapabilities",
     "AnimatorContext",
     "CharacterAnimatorBackend",
+    "ContextMode",
     "available_animators",
     "create_animator",
     "register_animator",

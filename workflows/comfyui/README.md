@@ -13,19 +13,24 @@ the ComfyUI UI does not require a code change.
 
 ## Shipped workflows
 
-Both are **wiring tests**, not renderers. Each uses core ComfyUI nodes only — no
-checkpoints, no custom nodes, no weights — so they validate on a bare ComfyUI
-install and the test suite can exercise the contract machinery without a model.
+Both are **wiring tests**, not renderers. Neither contains a checkpoint, a
+model name or anything that triggers a download.
 
 | Workflow | Backend | What it proves |
 | --- | --- | --- |
 | `garment_replace_placeholder` | `ComfyUIBackend` | Garment inputs arrive, outputs come back, manifests are complete |
-| `character_animate_placeholder` | `ComfyUIAnimatorBackend` | Pose control and context frames arrive, chunk outputs come back |
+| `character_animate_placeholder` | `ComfyUIAnimatorBackend` | A whole pose *sequence* arrives in order, batch size is bound, context frames arrive, chunk outputs come back one per frame |
 
 Neither produces usable output. `garment_replace_placeholder` flat-composites a
-reference image into the mask; `character_animate_placeholder` blends a pose
-image over a character reference and returns a single frame, which the animator
-backend correctly rejects as a chunk-size mismatch.
+reference image into the mask; `character_animate_placeholder` blends the pose
+run over a repeated character reference and drops the context sequence on the
+floor, so chunk continuity cannot be judged with it.
+
+**Node requirements.** `garment_replace_placeholder` uses core nodes only, so it
+validates on a bare ComfyUI install. `character_animate_placeholder` needs a
+directory-loading node (`LoadImagesFromDirectory`) from a custom node pack,
+because loading an ordered image run is what a multi-frame workflow actually
+does. `prepare()` names the missing node classes; install the pack yourself.
 
 ## Adding a real workflow
 

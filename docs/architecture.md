@@ -7,7 +7,7 @@ Performance* supplies every pixel of the performer, the background, the camera
 and the motion.
 
 A master now has two possible origins, and the distinction ends the moment it is
-accepted:
+promoted:
 
 ``captured_master``
     An authorized performer video already exists. Ingested with
@@ -15,10 +15,14 @@ accepted:
 ``synthetic_master``
     An original Hero Character is animated from a motion composition built out
     of reference clips. Created with ``app master create --origin synthetic``,
-    and **not usable until an operator explicitly accepts it**.
+    **not usable until an operator explicitly accepts it**, and not renderable
+    until ``app master promote`` turns the accepted candidate into a template.
 
-After acceptance a synthetic master is an immutable ``HumanTemplate`` like any
-other, and the garment pipeline cannot tell the difference — deliberately.
+Acceptance is the human judgement; promotion is the work — it freezes the
+generated PNG frames (never a re-encode), splits them at a transition anchor and
+records the hashes every later render is checked against. After promotion a
+synthetic master is an immutable ``HumanTemplate`` like any other, and the
+garment pipeline cannot tell the difference — deliberately.
 See [`motion-composition.md`](motion-composition.md). Identity vectors, pose, depth, flow and landmarks are
 auxiliary control and QA metadata — they are never substitutes for source
 pixels.
@@ -38,7 +42,7 @@ and the second case is confined to the garment region of the reveal segment.
 
 ```
   MOTION COMPOSITION            MASTER CREATION          GARMENT REPLACEMENT
-  (pose data only)              (needs acceptance)       (unchanged)
+  (pose data only)          (accept, then promote)       (unchanged)
 
   reference clips                Hero Character           garment references
         │                              │                         │
@@ -129,6 +133,10 @@ and the second case is confined to the garment region of the reveal segment.
 | Bridge endpoints equal the anchors | endpoints are copied, not evaluated | `test_bridge_endpoints_exactly_match_both_anchors` (tolerance 0) |
 | Composition frame count is exact | `expected_frame_count()` vs declaration vs disk | `test_composition_frame_count_has_no_off_by_one` |
 | A synthetic master needs acceptance | `accept_master` refuses without complete frames + QC | `test_a_candidate_is_not_usable_until_accepted` |
+| Acceptance alone does not make a master renderable | `promote_master` is a separate, audited step | `test_acceptance_alone_does_not_promote` |
+| A promoted master's pixels are the generated PNGs | hardlink/copy, hashed in place; no encode round trip | `test_promoted_frames_are_the_generated_pngs_byte_for_byte` |
+| A failed promotion leaves nothing half-built | template record and directory removed before re-raising | `test_a_failed_promotion_leaves_nothing_behind` |
+| Context frames recorded = context frames handed over | `ContextMode` decides what the pipeline gathers | `test_the_pipeline_gathers_exactly_the_declared_context` |
 
 ## Data flow for one render
 
@@ -214,7 +222,8 @@ now passes through a correction that places each joint at the interpolated bone
 length, so rigidity is structural.
 
 **Chunks are conditioned, not concatenated.** Chunks tile the output exactly and
-each receives the previous chunk's accepted tail as context. No frame is
+each receives as much of the previous chunk's accepted tail as the backend
+declares it consumes (`ContextMode`: none / last_frame / sequence). No frame is
 generated twice, so there is nothing to crossfade at a boundary.
 
 **A candidate master needs a human.** It is the one artifact a model invented
